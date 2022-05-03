@@ -11,5 +11,37 @@ using Test
 end
 
 @testset "rules" begin
-    @test string(1 --> 2 ⋅ 3) == "1 --> 2 ⋅ 3"
+    r = 1 --> 2 ⋅ 3
+    @test lhs(r) == 1
+    @test rhs(r) == Two(2, 3)
+    @test string(r) == "1 --> 2 ⋅ 3"
+end
+
+@testset "derivations and trees" begin
+    derivation = ['A' --> 'A'⋅'A', 'A' --> 'a', 'A' --> 'a']
+    tree = derivation2tree(derivation)
+    @test tree2derivation(tree) == derivation
+
+    derivation = [
+        'A' --> 'B', 
+        'B' --> 'C'⋅'D',
+        'C' --> 'c',
+        'D' --> 'B'⋅'A',
+        'B' --> 'b',
+        'A' --> 'a'
+    ]
+    tree = derivation2tree(derivation)
+    @test tree2derivation(tree) == derivation
+    @test tree isa Tree{Char}
+    @test Char == eltype(tree)
+    @test labels(tree) == ['A', 'B', 'C', 'c', 'D', 'B', 'b', 'A', 'a']
+    @test leaflabels(tree) == ['c', 'b', 'a']
+    @test innerlabels(tree) == ['A', 'B', 'C', 'D', 'B', 'A']
+end
+
+@testset "count binary trees" begin
+    a, A = 'a', 'A'
+    grammar = CNFG([A], [A --> A⋅A, A --> a])
+    chart = chartparse(grammar, CountScoring(), fill(a, 10))
+    @test [chart[1, n][A] for n in 1:10] == [1, 1, 2, 5, 14, 42, 132, 429, 1430, 4862]
 end
