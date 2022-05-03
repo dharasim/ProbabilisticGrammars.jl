@@ -1,17 +1,26 @@
 module ProbabilisticGrammars
 
-import Base: show, length, getindex, iterate, eltype, insert!
+import Base: show, length, getindex, iterate, eltype, insert!, zero, iszero
 
-export default, OneOrTwo, One, Two
+using LogProbs: LogProb
+using SimpleProbabilisticPrograms: logpdf, DirCat, symdircat
+
+export default, OneOrTwo, One, Two, ⊣
 export Tree, label, children, labels, innerlabels, leaflabels
 export Rule, -->, ⋅, lhs, rhs
 export derivation2tree, tree2derivation
+export StdCategory, T, NT, isterminal, isnonterminal
 export CNFG, chartparse, push_rules!
-export CountScoring
+export symdircat_ruledist
+export CountScoring, InsideScoring, BooleanScoring
+export AllDerivationScoring, getallderivations
+export WeightedDerivationScoring, sample_derivations
 
 #########
 # Utils #
 #########
+
+⊣(tag, x) = x.tag == tag
 
 default(::Type{T}) where {T <: Number} = zero(T)
 default(::Type{Char}) = '0'
@@ -161,6 +170,57 @@ end
 derivation = ['A' --> 'A'⋅'A', 'A' --> 'a', 'A' --> 'a']
 tree = derivation2tree(derivation)
 
+######################
+# Rule distributions #
+######################
+
+struct DirCatRuleDist{T}
+    dists :: Dict{T, DirCat{Rule{T}}}
+end
+
+(d::DirCatRuleDist)(x) = d.dists[x]
+
+function symdircat_ruledist(xs, rules, concentration=1.0)
+    applicable_rules(x) = filter(r -> lhs(r) == x, rules)
+    dists = Dict(
+        x => symdircat(applicable_rules(x), concentration) 
+        for x in xs
+    )
+    DirCatRuleDist(dists)
+end
+
+# struct ConstDirCatRuleDist{T}
+#     dist :: DirCat{Rule{T}}
+# end
+# 
+# (d::ConstDirCatRuleDist)(x) = d.dist
+
+####################################
+# Standard category implementation #
+####################################
+
+struct StdCategory{T}
+    isterminal :: Bool
+    val        :: T
+end
+
+T(val) = StdCategory(true, val)
+NT(val) = StdCategory(false, val)
+
+T(c::StdCategory)  = StdCategory(true, c.val)
+NT(c::StdCategory) = StdCategory(false, c.val)
+
+isterminal(c::StdCategory) = c.isterminal
+isnonterminal(c::StdCategory) = !c.isterminal
+default(::Type{StdCategory{T}}) where T = StdCategory(default(Bool), default(T))
+
+function show(io::IO, c::StdCategory)
+    if isterminal(c)
+        print(io, "T($(c.val))")
+    else
+        print(io, "NT($(c.val))")
+    end
+end
 
 ############
 # Grammars #
@@ -169,20 +229,21 @@ tree = derivation2tree(derivation)
 """
     CNFG(start_symbols, rules)
 
-Grammar in Chomsky-normal form.
+Grammar in Chomsky-normal form (CNF).
+
+The user is responsible for all rules being in CNF.
 """
 struct CNFG{T}
-    start_symbols :: Set{T}
-    lhss          :: Dict{Rhs{T}, Vector{T}} # left-hand sides
+    lhss :: Dict{Rhs{T}, Vector{T}} # left-hand sides
 
-    function CNFG(start_symbols, rules)
+    function CNFG(rules)
         T = eltype(eltype(typeof(rules)))
         lhss = Dict{Rhs{T}, Vector{T}}()
         for r in rules
             lhss_r = get!(() -> T[], lhss, rhs(r))
             push!(lhss_r, lhs(r))
         end
-        return new{T}(Set(collect(start_symbols)), lhss)
+        return new{T}(lhss)
     end
 end
 
@@ -200,6 +261,9 @@ function push_rules!(grammar::CNFG, stack, xs...)
     end
 end
 
+eltype(::CNFG{T}) where T = T
+ruletype(grammar) = Rule{eltype(grammar)}
+
 #######################
 # Scores and scorings #
 #######################
@@ -211,6 +275,149 @@ scoretype(::CountScoring, grammar) = Int
 rulescore(::CountScoring, rule) = 1
 addscores(::CountScoring, left, right) = left + right
 mulscores(::CountScoring, left, right) = left * right
+
+struct InsideScoring{D} ruledist::D end
+scoretype(::InsideScoring, grammar) = LogProb
+addscores(::InsideScoring, left, right) = left + right
+mulscores(::InsideScoring, left, right) = left * right
+function rulescore(sc::InsideScoring, rule)
+    d = sc.ruledist(lhs(rule))
+    LogProb(logpdf(d, rule), islog=true)
+end
+
+struct BooleanScoring end
+scoretype(::BooleanScoring, grammar) = Bool
+rulescore(::BooleanScoring, rule) = true
+addscores(::BooleanScoring, left, right) = left || right
+mulscores(::BooleanScoring, left, right) = left && right
+
+struct Derivations{T}
+    all :: Vector{Vector{Rule{T}}}
+end
+iszero(ds::Derivations) = isempty(ds.all)
+zero(::Type{Derivations{T}}) where T = Derivations(Vector{Rule{T}}[])
+getallderivations(ds::Derivations) = ds.all
+
+struct AllDerivationScoring end
+const ADS = AllDerivationScoring
+scoretype(::ADS, grammar) = Derivations{eltype(grammar)}
+rulescore(::ADS, rule) = Derivations([[rule]])
+addscores(::ADS, left, right) = Derivations([left.all; right.all])
+mulscores(::ADS, left, right) = Derivations([[l; r] for l in left.all for r in right.all])
+
+######################################################################
+### Free-semiring scorings with manually managed pointer structure ###
+######################################################################
+
+# Implementation idea: break rec. structure with indices into a vector (store).
+# Ihe store contains unboxed values, which reduces GC times.
+# Additionally, it allows to update probabilities without parsing again 
+# (not yet implemented).
+
+@enum ScoreTag ADD MUL VAL ZERO
+
+struct ScoredFreeEntry{S, V}
+    tag        :: ScoreTag
+    score      :: S
+    value      :: V
+    index      :: Int
+    leftIndex  :: Int
+    rightIndex :: Int
+
+    # addition and multiplication
+    function ScoredFreeEntry(
+        store :: Vector{ScoredFreeEntry{S, V}},
+        op    :: Union{typeof(+), typeof(*)},
+        left  :: ScoredFreeEntry{S, V}, 
+        right :: ScoredFreeEntry{S, V}
+    ) where {S, V}
+        tag(::typeof(+)) = ADD
+        tag(::typeof(*)) = MUL
+        score = op(left.score, right.score)
+        value = left.value # dummy value
+        index = length(store) + 1
+        x = new{S, V}(tag(op), score, value, index, left.index, right.index)
+        push!(store, x)
+        return x
+    end
+
+    # scored values
+    function ScoredFreeEntry(
+        store :: Vector{ScoredFreeEntry{S, V}},
+        score :: S,
+        value :: V
+    ) where {S, V}
+        index = length(store) + 1
+        x = new{S, V}(VAL, score, value, index)
+        push!(store, x)
+        return x
+    end
+
+    # constant zero
+    function ScoredFreeEntry(::Type{S}, ::Type{V}) where {S, V}
+        new{S, V}(ZERO, zero(S))
+    end
+end
+
+zero(::Type{ScoredFreeEntry{S, V}}) where {S, V} = ScoredFreeEntry(S, V)
+iszero(x::ScoredFreeEntry) = x.tag == ZERO
+
+# Weighted Derivation Scoring (WDS)
+struct WeightedDerivationScoring{D, T, L}
+    ruledist :: D
+    store    :: Vector{ScoredFreeEntry{LogProb, Rule{T}}}
+    logpdf   :: L
+end
+
+const WDS{D, T, L} = WeightedDerivationScoring{D, T, L}
+
+function WeightedDerivationScoring(ruledist, grammar, logpdf=logpdf)
+    WDS(ruledist, ScoredFreeEntry{LogProb, ruletype(grammar)}[], logpdf)
+end
+
+scoretype(::WDS, grammar) = ScoredFreeEntry{LogProb, ruletype(grammar)}
+
+function rulescore(sc::WDS, rule)
+    logp = LogProb(sc.logpdf(sc.ruledist(lhs(rule)), rule), islog=true)
+    ScoredFreeEntry(sc.store, logp, rule)
+end
+
+function addscores(sc::WDS, x, y)
+  ZERO == x.tag && return y
+  ZERO == y.tag && return x
+  return ScoredFreeEntry(sc.store, +, x, y)
+end
+
+function mulscores(sc::WDS, x, y)
+  ZERO == x.tag && return x
+  ZERO == y.tag && return y
+  return ScoredFreeEntry(sc.store, *, x, y)
+end
+
+function sample_derivations(
+    sc::WDS, x::ScoredFreeEntry{S, V}, n::Int
+  ) where {S, V}
+  vals = Vector{V}()
+  for _ in 1:n
+    sample_derivation!(vals, sc, x)
+  end
+  vals
+end
+
+function sample_derivation!(vals, sc::WDS, x::ScoredFreeEntry{S, V}) where {S, V}
+  if VAL ⊣ x 
+    push!(vals, x.value)
+  elseif ADD ⊣ x
+    goleft = rand(S) < sc.store[x.leftIndex].score / x.score
+    index = goleft ? x.leftIndex : x.rightIndex
+    sample_derivation!(vals, sc, sc.store[index])
+  elseif MUL ⊣ x
+    sample_derivation!(vals, sc, sc.store[x.leftIndex])
+    sample_derivation!(vals, sc, sc.store[x.rightIndex])
+  else # ZERO ⊣ x
+    error("cannot sample from zero")
+  end
+end
 
 ###########
 # Parsing #
