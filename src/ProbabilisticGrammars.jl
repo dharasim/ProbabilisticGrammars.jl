@@ -502,7 +502,15 @@ function chartparse(grammar, scoring, sequence::Vector{Vector{T}}) where T
     return chart
 end
 
-
-
-
 end # module
+
+#= 
+next steps:
+- [ ] implement best tree prediction scoring
+- [ ] design grammar model interface
+- [ ] implement tree similarity
+- [ ] implement treebank observation
+- [ ] implement variational inference
+- [ ] reproduce supervised results (harmony, rhythm, simple product)
+- [ ] reproduce unsupervised results (harmony, rhythm, simple product, regularized product)
+=#
