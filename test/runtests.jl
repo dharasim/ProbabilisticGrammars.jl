@@ -54,8 +54,14 @@ end
     chart = chartparse(grammar, scoring, fill(a, 10))
     @test exp(chart[1, 10][A].log) > 0
 
-    scoring = WeightedDerivationScoring(symdircat_ruledist([A], rules), grammar)
+    ruledist = symdircat_ruledist([A], rules)
+    scoring = WeightedDerivationScoring(ruledist, grammar)
     chart = chartparse(grammar, scoring, fill(a, 10))
     derivation = sample_derivations(scoring, chart[1, 10][A], 1)
+    @test leaflabels(derivation2tree(derivation)) == fill(a, 10)
+
+    scoring = BestDerivationScoring(ruledist, grammar)
+    chart = chartparse(grammar, scoring, fill(a, 10))
+    logprob, derivation = getbestderivation(scoring, chart[1, 10][A])
     @test leaflabels(derivation2tree(derivation)) == fill(a, 10)
 end

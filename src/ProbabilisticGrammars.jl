@@ -15,6 +15,7 @@ export symdircat_ruledist
 export CountScoring, InsideScoring, BooleanScoring
 export AllDerivationScoring, getallderivations
 export WeightedDerivationScoring, sample_derivations
+export BestDerivationScoring, getbestderivation
 
 #########
 # Utils #
@@ -417,6 +418,80 @@ function sample_derivation!(vals, sc::WDS, x::ScoredFreeEntry{S, V}) where {S, V
   else # ZERO ⊣ x
     error("cannot sample from zero")
   end
+end
+
+###########################
+# Best derivation scoring #
+###########################
+
+@enum DerivationTag CONCAT RULE
+
+# Each best derivation value is either an inner tree node with tag CONCAT
+# or a leaf node with tag RULE.
+# The rules of the derivation are the rules of the tree's leafs.
+# The usage of indices essentially implements a tiny garbage collector that is
+# much more efficient then Julia's default GC in this case, because the default
+# GC traverses reference graphs recursively.
+struct BestDerivation{T}
+    tag        :: DerivationTag
+    prob       :: LogProb
+    rule       :: Rule{T}
+    index      :: Int
+    leftIndex  :: Int
+    rightIndex :: Int
+  
+    # concatenation
+    function BestDerivation(
+            store :: Vector{BestDerivation{T}}, 
+            left  :: BestDerivation{T}, 
+            right :: BestDerivation{T},
+        ) where T
+        prob = left.prob * right.prob
+        rule = left.rule # dummy value
+        index = length(store) + 1
+        x = new{T}(CONCAT, prob, rule, index, left.index, right.index)
+        push!(store, x)
+        return x
+    end
+  
+    # single-rule derivations
+    function BestDerivation(store, prob::LogProb, rule::Rule{T}) where T
+        index = length(store) + 1
+        x = new{T}(RULE, prob, rule, index)
+        push!(store, x)
+        return x
+    end
+end
+
+struct BestDerivationScoring{D, T}
+    ruledist :: D
+    store    :: Vector{BestDerivation{T}}
+end
+
+const BDS{D, T} = BestDerivationScoring{D, T}
+BDS(ruledist, grammar) = BDS(ruledist, BestDerivation{eltype(grammar)}[])
+scoretype(::BDS, grammar) = BestDerivation{eltype(grammar)}
+addscores(::BDS, left, right) = left.prob >= right.prob ? left : right
+mulscores(sc::BDS, left, right) = BestDerivation(sc.store, left, right)
+
+function rulescore(sc::BDS, rule)
+  logp = LogProb(logpdf(sc.ruledist(lhs(rule)), rule), islog=true)
+  BestDerivation(sc.store, logp, rule)
+end
+
+function getbestderivation(sc::BDS, bd::BestDerivation{T}) where T
+    function getbestderivation!(out, sc, bd)
+        if RULE ⊣ bd
+            push!(out, bd.rule)
+        else # CONCAT ⊣ bd
+            getbestderivation!(out, sc, sc.store[bd.leftIndex])
+            getbestderivation!(out, sc, sc.store[bd.rightIndex])
+        end
+    end
+
+    derivation = Rule{T}[]
+    getbestderivation!(derivation,sc, bd)
+    bd.prob.log, derivation
 end
 
 ###########
