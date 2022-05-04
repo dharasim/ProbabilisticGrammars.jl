@@ -3,15 +3,15 @@ module ProbabilisticGrammars
 import Base: show, map, length, getindex, iterate, eltype, insert!, zero, iszero
 
 using LogProbs: LogProb
-using SimpleProbabilisticPrograms: logpdf, DirCat, symdircat
+using SimpleProbabilisticPrograms: logpdf, insupport, add_obs!, DirCat, symdircat
 
-export default, OneOrTwo, One, Two, ⊣
+export default, OneOrTwo, One, Two, ⊣, normalize
 export Tree, label, children, labels, innerlabels, leaflabels, tree_similarity
 export Rule, -->, ⋅, lhs, rhs
 export derivation2tree, tree2derivation
+export symdircat_ruledist, observe_trees!
 export StdCategory, T, NT, isterminal, isnonterminal
-export CNFG, chartparse, push_rules!
-export symdircat_ruledist
+export CNFP, chartparse, push_rules!
 export CountScoring, InsideScoring, BooleanScoring
 export AllDerivationScoring, getallderivations
 export WeightedDerivationScoring, sample_derivations
@@ -20,6 +20,8 @@ export BestDerivationScoring, getbestderivation
 #########
 # Utils #
 #########
+
+normalize(xs) = xs ./ sum(xs)
 
 ⊣(tag, x) = x.tag == tag
 
@@ -242,6 +244,20 @@ end
 # 
 # (d::ConstDirCatRuleDist)(x) = d.dist
 
+function observe_rule!(ruledist, rule, count=1)
+    if insupport(ruledist(lhs(rule)), rule)
+        add_obs!(ruledist(lhs(rule)), rule, count)
+    else
+        @info "Rule $rule not observed. It's not in the rule distribution."
+    end
+end
+  
+function observe_trees!(ruledist, trees)
+    for tree in trees, rule in tree2derivation(tree)
+        observe_rule!(ruledist, rule)
+    end
+end
+
 ####################################
 # Standard category implementation #
 ####################################
@@ -269,47 +285,128 @@ function show(io::IO, c::StdCategory)
     end
 end
 
-############
-# Grammars #
-############
+##########
+# Parser #
+##########
 
 """
-    CNFG(start_symbols, rules)
+    CNFP(rules)
 
-Grammar in Chomsky-normal form (CNF).
+Parser for a grammar in Chomsky-normal form (CNF).
 
 The user is responsible for all rules being in CNF.
 """
-struct CNFG{T}
-    lhss :: Dict{Rhs{T}, Vector{T}} # left-hand sides
+struct CNFP{T}
+    rules :: Set{Rule{T}}
+    lhss  :: Dict{Rhs{T}, Vector{T}} # left-hand sides
 
-    function CNFG(rules)
+    function CNFP(rules)
         T = eltype(eltype(typeof(rules)))
         lhss = Dict{Rhs{T}, Vector{T}}()
-        for r in rules
+        ruleset = Set(collect(rules))
+        for r in ruleset
             lhss_r = get!(() -> T[], lhss, rhs(r))
             push!(lhss_r, lhs(r))
         end
-        return new{T}(lhss)
+        return new{T}(ruleset, lhss)
     end
 end
 
 """
-    push_rules!(grammar, stack, rhs...)
+    push_rules!(parser, stack, rhs...)
 
 Push all rules with given right-hand side to stack.
 """
-function push_rules!(grammar::CNFG, stack, xs...)
+function push_rules!(parser::CNFP, stack, xs...)
     rhs = OneOrTwo(xs...)
-    if haskey(grammar.lhss, rhs)
-        for lhs in grammar.lhss[rhs]
+    if haskey(parser.lhss, rhs)
+        for lhs in parser.lhss[rhs]
             push!(stack, lhs --> rhs)
         end
     end
 end
 
-eltype(::CNFG{T}) where T = T
-ruletype(grammar) = Rule{eltype(grammar)}
+eltype(::CNFP{T}) where T = T
+ruletype(parser) = Rule{eltype(parser)}
+
+const ChartCell{T, S} = Dict{T, S} # map left-hand sides to scores
+const Chart{T, S} = Matrix{ChartCell{T, S}}
+
+function empty_chart(::Type{T}, ::Type{S}, n)::Chart{T, S} where {T, S}
+    [ Dict{T, S}() for _ in 1:n, _ in 1:n ]
+end
+
+function insert!(cell::ChartCell, scoring, lhs, s::S) where S    
+    if haskey(cell, lhs)
+        cell[lhs] = addscores(scoring, cell[lhs], s)
+    else
+        cell[lhs] = s
+    end
+end
+
+"""
+    chartparse(parser, scoring, sequence)
+"""
+function chartparse(parser, scoring, sequence)
+    chartparse(parser, scoring, [[x] for x in sequence])
+end
+
+function chartparse(parser, scoring, sequence::Vector{Vector{T}}) where T
+    n = length(sequence)
+    S = scoretype(scoring, parser)
+    chart = empty_chart(T, S, n)
+    stack = Vector{Rule{T}}() # channel for communicating completions
+    # using a single stack is much more efficient than constructing multiple arrays
+    stack_unary = Vector{Tuple{T, S}}()
+
+    score(rule) = rulescore(scoring, rule)
+
+    # terminal completions
+    for (i, terminals) in enumerate(sequence)
+        for terminal in terminals
+            push_rules!(parser, stack, terminal)
+        end
+        while !isempty(stack)
+            rule = pop!(stack)
+            insert!(chart[i, i], scoring, lhs(rule), score(rule))
+        end
+    end
+
+    for l in 1:n - 1         # length
+        for i in 1:n - l     # start index
+            j = i + l        # end index
+
+            # binary completions
+            for k in i:j - 1 # split index
+                for (rhs1, s1) in chart[i, k]
+                    for (rhs2, s2) in chart[k + 1, j]
+                        push_rules!(parser, stack, rhs1, rhs2)
+                        while !isempty(stack)
+                            rule = pop!(stack)
+                            s = mulscores(scoring, score(rule), s1, s2)
+                            insert!(chart[i, j], scoring, lhs(rule), s)
+                        end
+                    end
+                end
+            end
+
+            # unary completions
+            for (rhs, s) in chart[i, j]
+                push_rules!(parser, stack, rhs)
+                while !isempty(stack)
+                    rule = pop!(stack)
+                    push!(stack_unary, (lhs(rule), mulscores(scoring, score(rule), s)))
+                end
+            end
+            while !isempty(stack_unary)
+                (lhs, s) = pop!(stack_unary)
+                insert!(chart[i, j], scoring, lhs, s)
+            end
+        end
+    end
+
+    return chart
+end
 
 #######################
 # Scores and scorings #
@@ -318,13 +415,13 @@ ruletype(grammar) = Rule{eltype(grammar)}
 mulscores(scoring, s1, s2, s3) = mulscores(scoring, s1, mulscores(scoring, s2, s3))
 
 struct CountScoring end
-scoretype(::CountScoring, grammar) = Int
+scoretype(::CountScoring, parser) = Int
 rulescore(::CountScoring, rule) = 1
 addscores(::CountScoring, left, right) = left + right
 mulscores(::CountScoring, left, right) = left * right
 
 struct InsideScoring{D} ruledist::D end
-scoretype(::InsideScoring, grammar) = LogProb
+scoretype(::InsideScoring, parser) = LogProb
 addscores(::InsideScoring, left, right) = left + right
 mulscores(::InsideScoring, left, right) = left * right
 function rulescore(sc::InsideScoring, rule)
@@ -333,7 +430,7 @@ function rulescore(sc::InsideScoring, rule)
 end
 
 struct BooleanScoring end
-scoretype(::BooleanScoring, grammar) = Bool
+scoretype(::BooleanScoring, parser) = Bool
 rulescore(::BooleanScoring, rule) = true
 addscores(::BooleanScoring, left, right) = left || right
 mulscores(::BooleanScoring, left, right) = left && right
@@ -347,7 +444,7 @@ getallderivations(ds::Derivations) = ds.all
 
 struct AllDerivationScoring end
 const ADS = AllDerivationScoring
-scoretype(::ADS, grammar) = Derivations{eltype(grammar)}
+scoretype(::ADS, parser) = Derivations{eltype(parser)}
 rulescore(::ADS, rule) = Derivations([[rule]])
 addscores(::ADS, left, right) = Derivations([left.all; right.all])
 mulscores(::ADS, left, right) = Derivations([[l; r] for l in left.all for r in right.all])
@@ -418,11 +515,11 @@ end
 
 const WDS{D, T, L} = WeightedDerivationScoring{D, T, L}
 
-function WeightedDerivationScoring(ruledist, grammar, logpdf=logpdf)
-    WDS(ruledist, ScoredFreeEntry{LogProb, ruletype(grammar)}[], logpdf)
+function WeightedDerivationScoring(ruledist, parser, logpdf=logpdf)
+    WDS(ruledist, ScoredFreeEntry{LogProb, ruletype(parser)}[], logpdf)
 end
 
-scoretype(::WDS, grammar) = ScoredFreeEntry{LogProb, ruletype(grammar)}
+scoretype(::WDS, parser) = ScoredFreeEntry{LogProb, ruletype(parser)}
 
 function rulescore(sc::WDS, rule)
     logp = LogProb(sc.logpdf(sc.ruledist(lhs(rule)), rule), islog=true)
@@ -515,8 +612,8 @@ struct BestDerivationScoring{D, T}
 end
 
 const BDS{D, T} = BestDerivationScoring{D, T}
-BDS(ruledist, grammar) = BDS(ruledist, BestDerivation{eltype(grammar)}[])
-scoretype(::BDS, grammar) = BestDerivation{eltype(grammar)}
+BDS(ruledist, parser) = BDS(ruledist, BestDerivation{eltype(parser)}[])
+scoretype(::BDS, parser) = BestDerivation{eltype(parser)}
 addscores(::BDS, left, right) = left.prob >= right.prob ? left : right
 mulscores(sc::BDS, left, right) = BestDerivation(sc.store, left, right)
 
@@ -540,98 +637,18 @@ function getbestderivation(sc::BDS, bd::BestDerivation{T}) where T
     bd.prob.log, derivation
 end
 
-###########
-# Parsing #
-###########
-
-const ChartCell{T, S} = Dict{T, S} # map left-hand sides to scores
-const Chart{T, S} = Matrix{ChartCell{T, S}}
-
-function empty_chart(::Type{T}, ::Type{S}, n)::Chart{T, S} where {T, S}
-    [ Dict{T, S}() for _ in 1:n, _ in 1:n ]
-end
-
-function insert!(cell::ChartCell, scoring, lhs, s::S) where S    
-    if haskey(cell, lhs)
-        cell[lhs] = addscores(scoring, cell[lhs], s)
-    else
-        cell[lhs] = s
-    end
-end
-
-"""
-    chartparse(grammar, scoring, sequence)
-"""
-function chartparse(grammar, scoring, sequence)
-    chartparse(grammar, scoring, [[x] for x in sequence])
-end
-
-function chartparse(grammar, scoring, sequence::Vector{Vector{T}}) where T
-    n = length(sequence)
-    S = scoretype(scoring, grammar)
-    chart = empty_chart(T, S, n)
-    stack = Vector{Rule{T}}() # channel for communicating completions
-    # using a single stack is much more efficient than constructing multiple arrays
-    stack_unary = Vector{Tuple{T, S}}()
-
-    score(rule) = rulescore(scoring, rule)
-
-    # terminal completions
-    for (i, terminals) in enumerate(sequence)
-        for terminal in terminals
-            push_rules!(grammar, stack, terminal)
-        end
-        while !isempty(stack)
-            rule = pop!(stack)
-            insert!(chart[i, i], scoring, lhs(rule), score(rule))
-        end
-    end
-
-    for l in 1:n - 1         # length
-        for i in 1:n - l     # start index
-            j = i + l        # end index
-
-            # binary completions
-            for k in i:j - 1 # split index
-                for (rhs1, s1) in chart[i, k]
-                    for (rhs2, s2) in chart[k + 1, j]
-                        push_rules!(grammar, stack, rhs1, rhs2)
-                        while !isempty(stack)
-                            rule = pop!(stack)
-                            s = mulscores(scoring, score(rule), s1, s2)
-                            insert!(chart[i, j], scoring, lhs(rule), s)
-                        end
-                    end
-                end
-            end
-
-            # unary completions
-            for (rhs, s) in chart[i, j]
-                push_rules!(grammar, stack, rhs)
-                while !isempty(stack)
-                    rule = pop!(stack)
-                    push!(stack_unary, (lhs(rule), mulscores(scoring, score(rule), s)))
-                end
-            end
-            while !isempty(stack_unary)
-                (lhs, s) = pop!(stack_unary)
-                insert!(chart[i, j], scoring, lhs, s)
-            end
-        end
-    end
-
-    return chart
-end
-
 end # module
 
 #= 
 next steps:
 - [x] implement best tree prediction scoring
-- [ ] design grammar model interface
-- [ ] implement tree similarity
-- [ ] implement treebank observation
+- [x] design grammar model interface
+- [x] implement tree similarity
+- [x] implement treebank observation
 - [ ] implement variational inference
-- [ ] reproduce supervised results (harmony, rhythm, simple product)
+- [ ] reproduce supervised results
+    - [x] harmony
+    - [ ] rhythm 
+    - [ ] simple product
 - [ ] reproduce unsupervised results (harmony, rhythm, simple product, regularized product)
 =#
