@@ -1,12 +1,12 @@
 module ProbabilisticGrammars
 
-import Base: show, length, getindex, iterate, eltype, insert!, zero, iszero
+import Base: show, map, length, getindex, iterate, eltype, insert!, zero, iszero
 
 using LogProbs: LogProb
 using SimpleProbabilisticPrograms: logpdf, DirCat, symdircat
 
 export default, OneOrTwo, One, Two, ⊣
-export Tree, label, children, labels, innerlabels, leaflabels
+export Tree, label, children, labels, innerlabels, leaflabels, tree_similarity
 export Rule, -->, ⋅, lhs, rhs
 export derivation2tree, tree2derivation
 export StdCategory, T, NT, isterminal, isnonterminal
@@ -115,6 +115,52 @@ function zip_trees(t1, t2)
         zipped_children = map(zip_trees, t1.children, t2.children)
         Tree((t1.label, t2.label), zipped_children)
     end
+end
+
+function relabel_with_spans(tree)
+    k = 0 # leaf index
+    next_leafindex() = (k += 1; k)
+    span(i, j) = (from=i, to=j)
+    combine(span1, span2) = span(span1.from, span2.to)
+  
+    function relabel(tree) 
+        if isleaf(tree)
+            i = next_leafindex()
+            Tree(span(i,i))
+        elseif length(tree.children) == 1
+            child = relabel(tree.children[1])
+            Tree(child.label, child)
+        elseif length(tree.children) == 2
+            left  = relabel(tree.children[1])
+            right = relabel(tree.children[2])
+            Tree(combine(left.label, right.label), left, right)
+        else
+            error("tree is not binary")
+        end
+    end
+  
+    return relabel(tree)
+end
+  
+function collapse_unaries(tree)
+    if isleaf(tree)
+        tree
+    elseif length(tree.children) == 1
+        collapse_unaries(tree.children[1])
+    else
+        Tree(tree.label, map(collapse_unaries, tree.children))
+    end
+end
+  
+function constituent_spans(tree)
+    tree |> collapse_unaries |> relabel_with_spans |> innerlabels
+end
+  
+function tree_similarity(tree1, tree2)
+    spans1 = constituent_spans(tree1)
+    spans2 = constituent_spans(tree2)
+    @assert length(spans1) == length(spans2)
+    length(intersect(spans1, spans2)) / length(spans1)
 end
 
 #########
@@ -581,7 +627,7 @@ end # module
 
 #= 
 next steps:
-- [ ] implement best tree prediction scoring
+- [x] implement best tree prediction scoring
 - [ ] design grammar model interface
 - [ ] implement tree similarity
 - [ ] implement treebank observation

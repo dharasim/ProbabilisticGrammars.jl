@@ -39,7 +39,7 @@ end
     @test innerlabels(tree) == ['A', 'B', 'C', 'D', 'B', 'A']
 end
 
-@testset "binary tree grammar" begin
+@testset "scorings binary tree grammar" begin
     a, A = 'a', 'A'
     rules = [A --> A⋅A, A --> a]
     grammar = CNFG(rules)
@@ -59,9 +59,22 @@ end
     chart = chartparse(grammar, scoring, fill(a, 10))
     derivation = sample_derivations(scoring, chart[1, 10][A], 1)
     @test leaflabels(derivation2tree(derivation)) == fill(a, 10)
-
+    d1 = sample_derivations(scoring, chart[1, 10][A], 1)
+    d2 = sample_derivations(scoring, chart[1, 10][A], 1)
+    @test 0 <= tree_similarity(derivation2tree(d1), derivation2tree(d2)) <= 1
+    
     scoring = BestDerivationScoring(ruledist, grammar)
     chart = chartparse(grammar, scoring, fill(a, 10))
     logprob, derivation = getbestderivation(scoring, chart[1, 10][A])
     @test leaflabels(derivation2tree(derivation)) == fill(a, 10)
 end
+
+# a, A = 'a', 'A'
+# rules = [A --> A⋅A, A --> a]
+# grammar = CNFG(rules)
+# ruledist = symdircat_ruledist([A], rules)
+# scoring = WeightedDerivationScoring(ruledist, grammar)
+# chart = chartparse(grammar, scoring, fill(a, 10))
+# d1 = sample_derivations(scoring, chart[1, 10][A], 1)
+# d2 = sample_derivations(scoring, chart[1, 10][A], 1)
+# @test 0 <= tree_similarity(derivation2tree(d1), derivation2tree(d2)) <= 1
