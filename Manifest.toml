@@ -301,9 +301,11 @@ uuid = "1a1011a3-84de-559e-8e89-a11a2f7dc383"
 
 [[deps.SimpleProbabilisticPrograms]]
 deps = ["Distributions", "LogExpFunctions", "MacroTools", "Random", "SpecialFunctions", "Test"]
-git-tree-sha1 = "b0522244834bd65f865804de399ed2e287142bea"
+git-tree-sha1 = "45f3cb5fd4cd00494cf4fdd4ed1d9beaa36994ea"
+repo-rev = "master"
+repo-url = "https://github.com/dharasim/SimpleProbabilisticPrograms.jl.git"
 uuid = "be9b72de-c8a7-4672-afa1-cdbf18967232"
-version = "0.1.0"
+version = "0.2.0"
 
 [[deps.Sockets]]
 uuid = "6462fe0b-24de-5631-8697-dd941f90decc"

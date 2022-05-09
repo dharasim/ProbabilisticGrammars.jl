@@ -645,6 +645,8 @@ next steps:
 - [x] design grammar model interface
 - [x] implement tree similarity
 - [x] implement treebank observation
+- [ ] implement rhythm parser
+- [ ] implment product parser
 - [ ] implement variational inference
 - [ ] reproduce supervised results
     - [x] harmony
