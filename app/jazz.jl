@@ -106,57 +106,48 @@ begin # RhythmParser
     end
 end
 
-struct SimpleRhythmModel 
-    max_denom :: Int
-end
-
-@probprog function simple_rhythm_model(lhs, dists)
-    terminate ~ dists.terminate
-    if terminate
-        return lhs --> T(lhs)
-    else
-        ratio ~ dists.ratio
-        return lhs --> NT(lhs.val*ratio) ⋅ NT(lhs.val*(1-ratio))
+begin # SimpleRhythmModel
+    struct SimpleRhythmModel 
+        max_denom :: Int
     end
-    return
-end
 
-function recover_trace(::probprogtype(simple_rhythm_model), rule)
-    if length(rhs(rule)) == 1
-        (; terminate=true, ratio=default(Rational{Int}))
-    else
-        ratio = rhs(rule)[1].val / (rhs(rule)[1].val + rhs(rule)[2].val)
-        (; terminate=false, ratio)
+    @probprog function simple_rhythm_model(lhs, dists)
+        terminate ~ dists.terminate
+        if terminate
+            return lhs --> T(lhs)
+        else
+            ratio ~ dists.ratio
+            return lhs --> NT(lhs.val*ratio) ⋅ NT(lhs.val*(1-ratio))
+        end
+        return
     end
+
+    function recover_trace(::probprogtype(simple_rhythm_model), rule)
+        if length(rhs(rule)) == 1
+            (; terminate=true, ratio=default(Rational{Int}))
+        else
+            ratio = rhs(rule)[1].val / (rhs(rule)[1].val + rhs(rule)[2].val)
+            (; terminate=false, ratio)
+        end
+    end
+
+    function prior(::SimpleRhythmModel, parser::RhythmParser)
+        dists = (
+            terminate = DirCat(Dict(true => 1, false => 1)),
+            ratio     = DirCat(Dict(ratio => 0.1 for ratio in parser.splitratios)),
+        )
+        lhs -> simple_rhythm_model(lhs, dists)
+    end
+
+    function parser(model::SimpleRhythmModel)
+        m = model.max_denom
+        splitratios = Set(n//d for n in 1:m for d in n+1:m)
+        RhythmParser(splitratios)
+    end
+
+    seq2start(::SimpleRhythmModel, seq) = NT(1//1)
+    trees(::SimpleRhythmModel) = [tune["rhythm_tree"] for tune in treebank]
 end
-
-function prior(::SimpleRhythmModel, parser::RhythmParser)
-    dists = (
-        terminate = DirCat(Dict(true => 1, false => 1)),
-        ratio     = DirCat(Dict(ratio => 0.1 for ratio in parser.splitratios)),
-    )
-    lhs -> simple_rhythm_model(lhs, dists)
-end
-
-function parser(model::SimpleRhythmModel)
-    m = model.max_denom
-    splitratios = Set(n//d for n in 1:m for d in n+1:m)
-    RhythmParser(splitratios)
-end
-
-seq2start(::SimpleRhythmModel, seq) = NT(1//1)
-trees(::SimpleRhythmModel) = [tune["rhythm_tree"] for tune in treebank]
-
-# simple_rhythm_prior_dists(splitratios) = (
-#     terminate = DirCat(Dict(true => 1, false => 1)),
-#     ratio     = DirCat(Dict(ratio => 0.1 for ratio in splitratios)),
-# )
-# 
-# m = 100
-# splitratios = Set(n//d for n in 1:m for d in n+1:m)
-# dists = simple_rhythm_prior_dists(splitratios)
-# model = simple_rhythm_model(NT(1//2), dists)
-# logpdf(model, rand(model))
 
 ###################
 # Model execution #
