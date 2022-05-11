@@ -11,7 +11,7 @@ export Rule, -->, ⋅, lhs, rhs
 export derivation2tree, tree2derivation
 export symdircat_ruledist, observe_trees!
 export StdCategory, T, NT, isterminal, isnonterminal
-export CNFP, chartparse, push_rules!
+export CNFP, chartparse, push_rules!, ruletype
 export CountScoring, InsideScoring, BooleanScoring
 export AllDerivationScoring, getallderivations
 export WeightedDerivationScoring, sample_derivations
@@ -27,6 +27,7 @@ normalize(xs) = xs ./ sum(xs)
 
 default(::Type{T}) where {T <: Number} = zero(T)
 default(::Type{Char}) = '0'
+default(::Type{Tuple{T1, T2}}) where {T1, T2} = (default(T1), default(T2))
 
 struct OneOrTwo{T}
     length :: Int
