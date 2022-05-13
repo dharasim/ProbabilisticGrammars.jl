@@ -167,14 +167,31 @@ begin # ProductParser
         Tuple{eltype(p1), eltype(p2)}
     end
 
-    unzip(xs) = ntuple(i -> map(x -> x[i], xs), length(first(xs)))
+    function unzip(xs::OneOrTwo)
+        if isone(length(xs))
+            (One(xs[1][1]), One(xs[1][2]))
+        else
+            (Two(xs[1][1], xs[2][1]), Two(xs[1][2], xs[2][2]))
+        end
+    end
+    unzip(xs) = (zip(xs...)...,)
     product_rule(r1, r2) = (lhs(r1), lhs(r2)) --> zip(rhs(r1), rhs(r2))
 
     # inverse to product_rule
-    function rule_components(product_rule)
-        lhs1, lhs2 = lhs(product_rule)
-        rhs1, rhs2 = unzip(rhs(product_rule))
-        (lhs1 --> rhs1, lhs2 --> rhs2)
+    # needs to be written-out explicitely to ensure type inference of result
+    function product_rule_components(product_rule)
+        component1 = if isone(length(rhs(product_rule)))
+            lhs(product_rule)[1] --> rhs(product_rule)[1][1]
+        else
+            lhs(product_rule)[1] --> rhs(product_rule)[1][1] ⋅ rhs(product_rule)[2][1]
+        end
+        component2 = if isone(length(rhs(product_rule)))
+            lhs(product_rule)[2] --> rhs(product_rule)[1][2]
+        else
+            lhs(product_rule)[2] --> rhs(product_rule)[1][2] ⋅ rhs(product_rule)[2][2]
+        end
+
+        (component1, component2)
     end
 
     function push_rules!(parser::ProductParser, stack, cs...)
@@ -193,46 +210,48 @@ begin # ProductParser
     end
 end
 
-struct SimpleProductModel
-    rulekinds :: Vector{Symbol}
-    max_denom :: Int
-end
-
-seq2start(::SimpleProductModel, seq) = (NT(seq[end][1]), NT(1//1))
-trees(::SimpleProductModel) = [tune["product_tree"] for tune in treebank]
-
-function prior(::SimpleProductModel, parser::ProductParser)
-    harmony_parser, rhythm_parser = parser.components
-    dists = (
-        harmony_rule = symdircat_ruledist(NT.(all_chords), harmony_parser.rules, 0.1),
-        ratio        = DirCat(Dict(ratio => 0.1 for ratio in rhythm_parser.splitratios)),
-    )
-    lhs -> simple_product_model(lhs, dists)
-end
-
-@probprog function simple_product_model(lhs, dists)
-    harmony_lhs, rhythm_lhs = lhs
-    harmony_rule ~ dists.harmony_rule(harmony_lhs)
-    if istermination(harmony_rule)
-        rhythm_rule = rhythm_lhs --> T(rhythm_lhs)
-    else
-        ratio ~ dists.ratio
-        rhythm_rule = splitrule(rhythm_lhs, ratio)
+begin # SimpleProductModel
+    struct SimpleProductModel
+        rulekinds :: Vector{Symbol}
+        max_denom :: Int
     end
-    return product_rule(harmony_rule, rhythm_rule)
-end
 
-function recover_trace(::probprogtype(simple_product_model), product_rule)
-    harmony_rule, rhythm_rule = rule_components(product_rule)
-    ratio = rhs(rhythm_rule)[1].val / lhs(rhythm_rule).val
-    (; harmony_rule, ratio)
-end
+    seq2start(::SimpleProductModel, seq) = (NT(seq[end][1]), NT(1//1))
+    trees(::SimpleProductModel) = [tune["product_tree"] for tune in treebank]
 
-function parser(model::SimpleProductModel)
-    ProductParser(
-        parser(SimpleHarmonyModel(model.rulekinds)), 
-        parser(SimpleRhythmModel(model.max_denom)),
-    )
+    function prior(::SimpleProductModel, parser::ProductParser)
+        harmony_parser, rhythm_parser = parser.components
+        dists = (
+            harmony_rule = symdircat_ruledist(NT.(all_chords), harmony_parser.rules, 0.1),
+            ratio        = DirCat(Dict(ratio => 0.1 for ratio in rhythm_parser.splitratios)),
+        )
+        lhs -> simple_product_model(lhs, dists)
+    end
+
+    @probprog function simple_product_model(lhs, dists)
+        harmony_lhs, rhythm_lhs = lhs
+        harmony_rule ~ dists.harmony_rule(harmony_lhs)
+        if istermination(harmony_rule)
+            rhythm_rule = rhythm_lhs --> T(rhythm_lhs)
+        else
+            ratio ~ dists.ratio
+            rhythm_rule = splitrule(rhythm_lhs, ratio)
+        end
+        return product_rule(harmony_rule, rhythm_rule)
+    end
+
+    function recover_trace(::probprogtype(simple_product_model), product_rule)
+        harmony_rule, rhythm_rule = product_rule_components(product_rule)
+        ratio = rhs(rhythm_rule)[1].val / lhs(rhythm_rule).val
+        (; harmony_rule, ratio)
+    end
+
+    function parser(model::SimpleProductModel)
+        ProductParser(
+            parser(SimpleHarmonyModel(model.rulekinds)), 
+            parser(SimpleRhythmModel(model.max_denom)),
+        )
+    end
 end
 
 ###################
@@ -244,24 +263,18 @@ grammar = treebank_grammar(model);
 @time accs = map(trees(model)) do tree
     prediction = predict_tree(grammar, leaflabels(tree))
     tree_similarity(tree, prediction)
-end
-mean(accs)
+end; mean(accs)
 
 model = SimpleRhythmModel(100)
 grammar = treebank_grammar(model);
 @time accs = map(trees(model)) do tree
     prediction = predict_tree(grammar, leaflabels(tree))
     tree_similarity(tree, prediction)
-end
-mean(accs)
+end; mean(accs)
 
 model = SimpleProductModel([:rightheaded], 100)
 grammar = treebank_grammar(model);
 @time accs = map(trees(model)) do tree
     prediction = predict_tree(grammar, leaflabels(tree))
     tree_similarity(tree, prediction)
-end
-mean(accs)
-
-@time rule = rand(prior(model, grammar.parser)((NT(first(all_chords)), NT(1//1))))
-# @codewarntype rand(prior(model, grammar.parser)((NT(first(all_chords)), NT(1//1))))
+end; mean(accs)

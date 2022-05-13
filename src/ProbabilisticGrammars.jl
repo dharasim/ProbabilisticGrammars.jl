@@ -210,7 +210,8 @@ function derivation2tree(derivation)
         end
     end
 
-    rewrite(lhs(first(derivation)))
+    label = lhs(first(derivation))
+    rewrite(label)::Tree{typeof(label)}
 end
 
 function tree2derivation(tree::Tree{T}) where T
