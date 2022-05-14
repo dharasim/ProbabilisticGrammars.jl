@@ -82,6 +82,37 @@ begin # SimpleHarmonyModel
     end
 end
 
+begin # TranspInvModel
+    dists = (
+        terminate = symdircat([true, false], 0.1),
+        rightheaded = symdircat([true, false], 0.1),
+        interval = symdircat(all_intervals(-12, 12), 0.1),
+        form = Dict(f => symdircat(all_forms, 0.1) for f in all_forms),
+    )
+
+    @probprog function transp_inv_model(lhs, dists)
+        terminate ~ dists.terminate
+        if terminate 
+            return lhs --> T(lhs)
+        end
+
+        interval ~ dists.interval
+        form     ~ dists.form[lhs.val.form]
+        chord    = NT(JHT.Chord(lhs.val.root + interval, form))
+        if lhs == chord
+            return lhs --> lhs⋅lhs
+        else
+            rightheaded ~ dists.rightheaded
+            return rightheaded ? (lhs --> chord⋅lhs) : (lhs --> lhs⋅chord)
+        end
+    end
+end
+
+# lhs = NT(first(all_chords))
+# d = transp_inv_model(lhs, dists)
+# rand(d)
+
+
 begin # RhythmParser
     struct RhythmParser
         splitratios :: Set{Rational{Int}}
