@@ -642,17 +642,21 @@ end
 end # module
 
 #= 
-next steps:
+tasks:
 - [x] implement best tree prediction scoring
 - [x] design grammar model interface
 - [x] implement tree similarity
 - [x] implement treebank observation
-- [ ] implement rhythm parser
-- [ ] implment product parser
-- [ ] implement variational inference
+- [x] implement rhythm parser
+- [x] implement product parser
 - [ ] reproduce supervised results
-    - [x] harmony
-    - [ ] rhythm 
-    - [ ] simple product
+    - [x] simple harmony
+    - [ ] transpositionally invariant harmony
+    - [x] rhythm 
+    - [x] simple product
+    - [ ] transpositionally invariant product
+- [ ] implement variational inference
 - [ ] reproduce unsupervised results (harmony, rhythm, simple product, regularized product)
+- [ ] modify probabilistic grammar struct to include field `dists`
+- [ ] try optimizing allocation simple probprogs (no tuple destructuring in `sample`)
 =#
