@@ -1,9 +1,13 @@
 module ProbabilisticGrammars
 
-import Base: show, map, length, getindex, iterate, eltype, insert!, zero, iszero
+import Base: *, +, show, map, length, getindex, iterate, eltype, insert!, zero, iszero
 
 using LogProbs: LogProb
-using SimpleProbabilisticPrograms: logpdf, insupport, add_obs!, DirCat, symdircat
+using Setfield: @set
+using DataStructures: counter, Accumulator
+using ProgressMeter: Progress, progress_map
+using SimpleProbabilisticPrograms: SimpleProbabilisticPrograms
+using SimpleProbabilisticPrograms: logpdf, logvarpdf, insupport, add_obs!, DirCat, symdircat
 
 export default, OneOrTwo, One, Two, ⊣, normalize
 export Tree, label, children, labels, innerlabels, leaflabels, tree_similarity
@@ -16,6 +20,8 @@ export CountScoring, InsideScoring, BooleanScoring
 export AllDerivationScoring, getallderivations
 export WeightedDerivationScoring, sample_derivations
 export BestDerivationScoring, getbestderivation
+export ProbabilisticGrammar, train_on_trees!, use_map_params, predict_tree
+export estimate_rule_counts, runvi
 
 #########
 # Utils #
@@ -28,6 +34,11 @@ normalize(xs) = xs ./ sum(xs)
 default(::Type{T}) where {T <: Number} = zero(T)
 default(::Type{Char}) = '0'
 default(::Type{Tuple{T1, T2}}) where {T1, T2} = (default(T1), default(T2))
+
+*(a::Accumulator, n::Number) = Accumulator(Dict(k => v*n for (k,v) in a.map))
+*(n::Number, a::Accumulator) = Accumulator(Dict(k => n*v for (k,v) in a.map))
++(a::Accumulator, n::Number) = Accumulator(Dict(k => v+n for (k,v) in a.map))
++(n::Number, a::Accumulator) = Accumulator(Dict(k => n+v for (k,v) in a.map))
 
 struct OneOrTwo{T}
     length :: Int
@@ -225,26 +236,39 @@ tree = derivation2tree(derivation)
 # Rule distributions #
 ######################
 
-struct DirCatRuleDist{T}
-    dists :: Dict{T, DirCat{Rule{T}}}
-end
-
-(d::DirCatRuleDist)(x) = d.dists[x]
-
-function symdircat_ruledist(xs, rules, concentration=1.0)
-    applicable_rules(x) = filter(r -> lhs(r) == x, rules)
-    dists = Dict(
-        x => symdircat(applicable_rules(x), concentration) 
-        for x in xs
-    )
-    DirCatRuleDist(dists)
-end
-
-# struct ConstDirCatRuleDist{T}
-#     dist :: DirCat{Rule{T}}
+# struct DirCatRuleDist{T}
+#     dists :: Dict{T, DirCat{Rule{T}}}
 # end
 # 
-# (d::ConstDirCatRuleDist)(x) = d.dist
+# (d::DirCatRuleDist)(x) = d.dists[x]
+# 
+# function symdircat_ruledist(xs, rules, concentration=1.0)
+#     applicable_rules(x) = filter(r -> lhs(r) == x, rules)
+#     dists = Dict(
+#         x => symdircat(applicable_rules(x), concentration) 
+#         for x in xs
+#     )
+#     DirCatRuleDist(dists)
+# end
+
+import Base: rand
+import Distributions: logpdf
+using Random: AbstractRNG
+
+struct GenericCategorical{T}
+    probs :: Dict{T, Float64}
+end
+
+function rand(rng::AbstractRNG, gc::GenericCategorical)
+    r = rand(rng)
+    q = 0
+    for (x, p) in gc.probs
+        q += p
+        if q > r; return x; end
+    end
+end
+
+logpdf(gc::GenericCategorical, x) = log(gc.probs[x])
 
 function observe_rule!(ruledist, rule, count=1)
     if insupport(ruledist(lhs(rule)), rule)
@@ -638,5 +662,92 @@ function getbestderivation(sc::BDS, bd::BestDerivation{T}) where T
     getbestderivation!(derivation,sc, bd)
     bd.prob.log, derivation
 end
+
+#########################
+# Probabilistic grammar #
+#########################
+
+struct ProbabilisticGrammar{P, D, R, S2S}
+    parser    :: P
+    dists     :: D
+    ruledist  :: R
+    seq2start :: S2S
+end
+
+function train_on_trees!(grammar::ProbabilisticGrammar, trees)
+    observe_trees!(grammar.ruledist, trees)
+    return grammar
+end
+
+# use maximum a priori parameters
+function use_map_params(grammar::ProbabilisticGrammar)
+    map_dists = map(use_map_params, grammar.dists)
+    @set grammar.dists = map_dists
+end
+
+function use_map_params(dict::Dict)
+    Dict(k => use_map_params(v) for (k, v) in dict)
+end
+
+function use_map_params(dc::DirCat)
+    if !dc.logpdfs_uptodate
+        SimpleProbabilisticPrograms.update_logpdfs!(dc)
+    end
+    s = sum(values(dc.pscounts))
+    map_params = Dict(x => c/s for (x, c) in dc.pscounts)
+    GenericCategorical(map_params)
+end
+
+function predict_tree(grammar::ProbabilisticGrammar, seq)
+    scoring = BestDerivationScoring(grammar.ruledist, grammar.parser)
+    chart   = chartparse(grammar.parser, scoring, seq)
+    forest  = chart[1, end][grammar.seq2start(seq)]
+    logprob, derivation = getbestderivation(scoring, forest)
+    derivation2tree(derivation)
+end
+
+#########################
+# Variational inference #
+#########################
+
+function estimate_rule_counts(
+      grammar::ProbabilisticGrammar, sequences; 
+      seq2numtrees=seq->length(seq)^2, showprogress=true
+    )
+    p = Progress(length(sequences); desc="estimating rule counts: ", enabled=showprogress)
+    estimates_per_sequence = progress_map(sequences; progress=p) do sequence
+        scoring = WDS(grammar.ruledist, grammar.parser, logvarpdf)
+        chart = chartparse(grammar.parser, scoring, sequence)
+        forest = chart[1, end][grammar.seq2start(sequence)]
+        n = seq2numtrees(sequence)
+        return 1/n * counter(sample_derivations(scoring, forest, n))
+    end
+    reduce(merge!, estimates_per_sequence)
+end
+
+# run variational inference
+function runvi(
+      mk_grammar, sequences; 
+      epochs, seq2numtrees=seq->length(seq)^2, showprogress=true
+    )
+    grammar = mk_grammar()
+    for e in 1:epochs
+        showprogress ? println("epoch $e of $epochs") : nothing
+        rule_counts = estimate_rule_counts(grammar, sequences; seq2numtrees, showprogress)
+        grammar = mk_grammar()
+        for (rule, pscount) in rule_counts
+            add_obs!(grammar.ruledist(lhs(rule)), rule, pscount)
+        end
+    end
+    return grammar
+end
+# 
+# # run variational inference with automatic prior initialization
+# function runvi(
+#     epochs, mk_prior, grammar::Grammar, other_estimation_args...;
+#     showprogress=true
+#   )
+#   runvi(epochs, mk_prior, mk_prior(), grammar, other_estimation_args...; showprogress)
+# end
 
 end # module

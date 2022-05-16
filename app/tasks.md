@@ -14,8 +14,10 @@
     - [x] transpositionally invariant product
 - [x] implement recursive `max_posterior_parameters` for compound distributions
 - [x] reproduce supervised results with cross validation
-- [ ] implement variational inference
-- [ ] reproduce unsupervised results (harmony, rhythm, simple product, regularized product)
+- [x] implement variational inference
+- [x] reproduce unsupervised results (harmony, rhythm, simple product)
+- [ ] implement regularized rhythm grammar
+- [ ] implement regularized product grammar
 - [x] modify probabilistic grammar struct to include field `dists`
 - [/] try optimizing allocation simple probprogs (no tuple destructuring in `sample`)
 - [ ] put function `use_map_params` into SimpleProbabilisticPrograms
