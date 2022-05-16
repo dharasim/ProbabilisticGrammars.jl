@@ -12,8 +12,8 @@
     - [x] rhythm 
     - [x] simple product
     - [ ] transpositionally invariant product
-- [ ] implement recursive `max_posterior_parameters` for compound distributions
-- [ ] reproduce supervised results with cross validation
+- [x] implement recursive `max_posterior_parameters` for compound distributions
+- [x] reproduce supervised results with cross validation
 - [ ] implement variational inference
 - [ ] reproduce unsupervised results (harmony, rhythm, simple product, regularized product)
 - [x] modify probabilistic grammar struct to include field `dists`
