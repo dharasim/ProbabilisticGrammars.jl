@@ -2,6 +2,7 @@ include("jazz_models.jl")
 
 using ProgressMeter: @showprogress
 using Random: randperm, default_rng
+using Base.Iterators: flatten
 using Logging: Logging
 Logging.disable_logging(Logging.Info)
 
@@ -25,11 +26,9 @@ function cross_validation_index_split(num_folds, num_total, rng=default_rng())
   return collect(zip(test_indices, train_indices))
 end
 
-
-using Base.Iterators: flatten
 function prediction_accs_crossval(treebankgrammar, trees, num_folds)
     index_splits = cross_validation_index_split(num_folds, length(trees))
-    accss = @showprogress map(index_splits) do (test_idxs, train_idxs)
+    accss = map(index_splits) do (test_idxs, train_idxs)
         grammar = treebankgrammar(trees[train_idxs])
         prediction_accs(grammar, trees[test_idxs])
     end
