@@ -91,41 +91,71 @@ begin # simple harmony grammar
     istermination(harmony_rule) = isone(length(rhs(harmony_rule)))
 end
 
-begin # TranspInvModel
+begin # transpositionally invariant grammar
     all_intervals(from, to) = Pitches.SpelledIC.(from:to)
-    dists = (
-        terminate = symdircat([true, false], 0.1),
-        rightheaded = symdircat([true, false], 0.1),
-        interval = symdircat(all_intervals(-12, 12), 0.1),
-        form = Dict(f => symdircat(all_forms, 0.1) for f in all_forms),
-    )
 
-    @probprog function transp_inv_model(lhs, dists)
+    function transpinv_harmony_grammar(; rulekinds=[:rightheaded, :leftheaded])
+        rules = harmony_rules(rulekinds)
+        parser = CNFP(rules)
+        ints = all_intervals(-12, 12)
+        dists = (
+            terminate   = symdircat([true, false], 1),
+            interval    = Dict(f => symdircat(ints, 0.1) for f in all_forms),
+            form        = Dict((i, f) => symdircat(all_forms, 0.1) for i in ints for f in all_forms),
+            rightheaded = symdircat([true, false], 0.1),
+        )
+        ruledist(lhs) = transpinv_harmony_model(lhs, dists, rulekinds)
+        seq2start(seq) = NT(seq[end])
+        ProbabilisticGrammar(parser, dists, ruledist, seq2start)
+    end
+
+    @probprog function transpinv_harmony_model(lhs, dists, rulekinds)
         terminate ~ dists.terminate
         if terminate 
             return lhs --> T(lhs)
         end
 
-        interval ~ dists.interval
-        form     ~ dists.form[lhs.val.form]
+        interval ~ dists.interval[lhs.val.form]
+        form     ~ dists.form[interval, lhs.val.form]
         chord    = NT(JHT.Chord(lhs.val.root + interval, form))
         if lhs == chord
             return lhs --> lhs⋅lhs
-        else
+        elseif :rightheaded in rulekinds && :leftheaded in rulekinds
             rightheaded ~ dists.rightheaded
             return rightheaded ? (lhs --> chord⋅lhs) : (lhs --> lhs⋅chord)
+        elseif :rightheaded in rulekinds
+            return lhs --> chord⋅lhs
+        elseif :leftheaded in rulekinds
+            return lhs --> lhs⋅chord
+        else
+            error("rulekinds = $rulekinds must include either leftheaded or rightheaded")
         end
     end
 
-    function recover_trace(::probprogtype(transp_inv_model), rule)
-        
+    function recover_trace(::probprogtype(transpinv_harmony_model), rule)
+        if istermination(rule)
+            terminate   = true
+            rightheaded = default(Bool)
+            interval    = default(Pitches.SpelledIC)
+            form        = default(JHT.ChordForm)
+        else
+            terminate   = false
+            rightheaded = lhs(rule) == rhs(rule)[2]
+            chord       = rightheaded ? rhs(rule)[1] : rhs(rule)[2]
+            interval    = chord.val.root - lhs(rule).val.root
+            form        = chord.val.form
+        end
+        (; terminate, rightheaded, interval, form)
     end
 end
 
+tuple(Pitches.parsespelledpitch("C")) .+ all_intervals(-12, 12)
+
 # nt = NT(first(all_chords))
-# d = transp_inv_model(nt, dists)
+# rulekinds = [:rightheaded, :leftheaded]
+# d = transpinv_harmony_model(nt, dists, rulekinds)
 # rule = rand(d)
-# logpdf(d, rule)
+# @time logpdf(d, rule)
 
 begin # RhythmParser
     struct RhythmParser
@@ -291,26 +321,28 @@ end
 # Model execution #
 ###################
 
-grammar = simple_harmony_grammar(rulekinds=[:rightheaded]);
+using ProgressMeter: @showprogress
+
+function naive_supervised_evaluation_accs(grammar, trees)
+    @showprogress map(trees) do tree
+        prediction = predict_tree(grammar, leaflabels(tree))
+        tree_similarity(tree, prediction)
+    end
+end
+
 trees = [tune["harmony_tree"] for tune in treebank];
-train_on_trees!(grammar, trees);
-@time accs = map(trees) do tree
-    prediction = predict_tree(grammar, leaflabels(tree))
-    tree_similarity(tree, prediction)
-end; mean(accs)
+grammar = train_on_trees!(simple_harmony_grammar(rulekinds=[:rightheaded]), trees);
+@time mean(naive_supervised_evaluation_accs(grammar, trees))
 
-grammar = simple_rhythm_grammar();
 trees = [tune["rhythm_tree"] for tune in treebank];
-train_on_trees!(grammar, trees);
-@time accs = map(trees) do tree
-    prediction = predict_tree(grammar, leaflabels(tree))
-    tree_similarity(tree, prediction)
-end; mean(accs)
+grammar = train_on_trees!(simple_rhythm_grammar(), trees);
+@time mean(naive_supervised_evaluation_accs(grammar, trees))
 
-grammar = simple_product_grammar(rulekinds=[:rightheaded]);
+trees = [tune["harmony_tree"] for tune in treebank];
+grammar = train_on_trees!(transpinv_harmony_grammar(rulekinds=[:rightheaded]), trees);
+mean(naive_supervised_evaluation_accs(grammar, trees))
+
 trees = [tune["product_tree"] for tune in treebank];
-train_on_trees!(grammar, trees);
-@time accs = map(trees) do tree
-    prediction = predict_tree(grammar, leaflabels(tree))
-    tree_similarity(tree, prediction)
-end; mean(accs)
+grammar = train_on_trees!(simple_product_grammar(rulekinds=[:rightheaded]), trees);
+@time mean(naive_supervised_evaluation_accs(grammar, trees))
+
