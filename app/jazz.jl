@@ -7,7 +7,7 @@ begin # imports and constants
     import Base: eltype
 
     using ProbabilisticGrammars
-    using SimpleProbabilisticPrograms: SimpleProbabilisticPrograms, logpdf, symdircat, DirCat, @probprog, probprogtype
+    using SimpleProbabilisticPrograms: SimpleProbabilisticPrograms, logpdf, symdircat, DirCat, @probprog, probprogtype, Dirac, ProbProg
     using Pitches: Pitches
     using Statistics: mean
 
@@ -23,66 +23,76 @@ begin # imports and constants
 end 
 
 begin # ProbabilisticGrammar
-    mutable struct ProbabilisticGrammar{P, D, F}
+    struct ProbabilisticGrammar{P, D, R, S2S}
         parser    :: P
-        ruledist  :: D
-        seq2start :: F
+        dists     :: D
+        ruledist  :: R
+        seq2start :: S2S
     end
 
-    function prior_grammar(model)
-        p = parser(model)
-        ProbabilisticGrammar(p, prior(model, p), seq -> seq2start(model, seq))
-    end
-
-    function treebank_grammar(model)
-        grammar = prior_grammar(model)
-        observe_trees!(grammar.ruledist, trees(model))
+    function train_on_trees!(grammar::ProbabilisticGrammar, trees)
+        observe_trees!(grammar.ruledist, trees)
         return grammar
+    end
+
+    function use_map_params!(grammar::ProbabilisticGrammar)
+
     end
 
     function predict_tree(grammar::ProbabilisticGrammar, seq)
         scoring = BestDerivationScoring(grammar.ruledist, grammar.parser)
-        chart = chartparse(grammar.parser, scoring, seq)
-        forest = chart[1, end][grammar.seq2start(seq)]
+        chart   = chartparse(grammar.parser, scoring, seq)
+        forest  = chart[1, end][grammar.seq2start(seq)]
         logprob, derivation = getbestderivation(scoring, forest)
         derivation2tree(derivation)
     end
 end
 
-begin # SimpleHarmonyModel
-    struct SimpleHarmonyModel
-        rulekinds :: Vector{Symbol} # [:leftheaded, :rightheaded]
-    end
-
-    seq2start(::SimpleHarmonyModel, seq) = NT(seq[end])
-    trees(::SimpleHarmonyModel) = [tune["harmony_tree"] for tune in treebank]
-    istermination(harmony_rule) = isone(length(rhs(harmony_rule)))
-
-    function prior(model::SimpleHarmonyModel, parser=parser(model))
-        symdircat_ruledist(NT.(all_chords), parser.rules, 0.1)
-    end
-
-    function parser(model::SimpleHarmonyModel)
+begin # simple harmony grammar
+    function harmony_rules(rulekinds)
         ts  = T.(all_chords)  # terminals
         nts = NT.(all_chords) # nonterminals
 
         # termination and duplication rules are always included
-        rules = [nt --> t for (nt, t) in zip(nts, ts)]
-        append!(rules, [nt --> nt⋅nt for nt in nts])
+        rules = [[nt --> t for (nt, t) in zip(nts, ts)]; [nt --> nt⋅nt for nt in nts]]
 
         # include headed rules
-        if :leftheaded in model.rulekinds
+        if :leftheaded in rulekinds
             append!(rules, [nt1 --> nt1⋅nt2 for nt1 in nts for nt2 in nts if nt1 != nt2])
         end
-        if :rightheaded in model.rulekinds
+        if :rightheaded in rulekinds
             append!(rules, [nt2 --> nt1⋅nt2 for nt1 in nts for nt2 in nts if nt1 != nt2])
         end
 
-        CNFP(rules)
+        return rules
     end
+
+    function simple_harmony_grammar(;
+            rulekinds = [:leftheaded, :rightheaded],
+            concentration = 0.1,
+        )
+        rules = harmony_rules(rulekinds)
+        parser = CNFP(rules)
+        dircat(nt) = symdircat([r for r in rules if lhs(r)==nt], concentration)
+        dists = (
+            rule = Dict(nt => dircat(nt) for nt in NT.(all_chords)),
+        )
+        ruledist(lhs) = simple_harmony_model(lhs, dists)
+        seq2start(seq) = NT(seq[end])
+        ProbabilisticGrammar(parser, dists, ruledist, seq2start)
+    end
+
+    @probprog function simple_harmony_model(lhs, dists)
+        rule ~ dists.rule[lhs]
+        return rule
+    end
+
+    recover_trace(::ProbProg{typeof(simple_harmony_model)}, rule) = (rule = rule, )
+    istermination(harmony_rule) = isone(length(rhs(harmony_rule)))
 end
 
 begin # TranspInvModel
+    all_intervals(from, to) = Pitches.SpelledIC.(from:to)
     dists = (
         terminate = symdircat([true, false], 0.1),
         rightheaded = symdircat([true, false], 0.1),
@@ -106,12 +116,16 @@ begin # TranspInvModel
             return rightheaded ? (lhs --> chord⋅lhs) : (lhs --> lhs⋅chord)
         end
     end
+
+    function recover_trace(::probprogtype(transp_inv_model), rule)
+        
+    end
 end
 
-# lhs = NT(first(all_chords))
-# d = transp_inv_model(lhs, dists)
-# rand(d)
-
+# nt = NT(first(all_chords))
+# d = transp_inv_model(nt, dists)
+# rule = rand(d)
+# logpdf(d, rule)
 
 begin # RhythmParser
     struct RhythmParser
@@ -138,21 +152,19 @@ begin # RhythmParser
     end
 end
 
-begin # SimpleRhythmModel
-    struct SimpleRhythmModel 
-        max_denom :: Int
-    end
-
-    seq2start(::SimpleRhythmModel, seq) = NT(1//1)
-    trees(::SimpleRhythmModel) = [tune["rhythm_tree"] for tune in treebank]
+begin # simple rhythm grammar
+    ratios_max_denom(m) = Set(n//d for n in 1:m for d in n+1:m)
     splitrule(lhs, ratio) = lhs --> NT(lhs.val*ratio) ⋅ NT(lhs.val*(1-ratio))
 
-    function prior(::SimpleRhythmModel, parser::RhythmParser)
+    function simple_rhythm_grammar(; splitratios=ratios_max_denom(100))
+        parser = RhythmParser(splitratios)
         dists = (
-            terminate = DirCat(Dict(true => 1, false => 1)),
-            ratio     = DirCat(Dict(ratio => 0.1 for ratio in parser.splitratios)),
+            terminate = symdircat([true, false], 1),
+            ratio     = symdircat(splitratios, 0.1),
         )
-        lhs -> simple_rhythm_model(lhs, dists)
+        ruledist(lhs) = simple_rhythm_model(lhs, dists)
+        seq2start(seq) = NT(1//1)
+        ProbabilisticGrammar(parser, dists, ruledist, seq2start)
     end
 
     @probprog function simple_rhythm_model(lhs, dists)
@@ -173,12 +185,6 @@ begin # SimpleRhythmModel
             ratio = rhs(rule)[1].val / (rhs(rule)[1].val + rhs(rule)[2].val)
             (terminate=false, ratio=ratio)
         end
-    end
-
-    function parser(model::SimpleRhythmModel)
-        m = model.max_denom
-        splitratios = Set(n//d for n in 1:m for d in n+1:m)
-        RhythmParser(splitratios)
     end
 end
 
@@ -241,27 +247,30 @@ begin # ProductParser
     end
 end
 
-begin # SimpleProductModel
-    struct SimpleProductModel
-        rulekinds :: Vector{Symbol}
-        max_denom :: Int
-    end
-
-    seq2start(::SimpleProductModel, seq) = (NT(seq[end][1]), NT(1//1))
-    trees(::SimpleProductModel) = [tune["product_tree"] for tune in treebank]
-
-    function prior(::SimpleProductModel, parser::ProductParser)
-        harmony_parser, rhythm_parser = parser.components
-        dists = (
-            harmony_rule = symdircat_ruledist(NT.(all_chords), harmony_parser.rules, 0.1),
-            ratio        = DirCat(Dict(ratio => 0.1 for ratio in rhythm_parser.splitratios)),
+begin # simple product grammar
+    function simple_product_grammar(;
+            rulekinds = [:leftheaded, :rightheaded],
+            concentration = 0.1,
+            splitratios = ratios_max_denom(100),
         )
-        lhs -> simple_product_model(lhs, dists)
+        h_rules = harmony_rules(rulekinds)
+        parser = ProductParser(
+            CNFP(h_rules),
+            RhythmParser(splitratios),
+        )
+        dircat(h_nt) = symdircat([r for r in h_rules if lhs(r)==h_nt], concentration)
+        dists = (
+            harmony_rule = Dict(h_nt => dircat(h_nt) for h_nt in NT.(all_chords)),
+            ratio = symdircat(splitratios, 0.1),
+        )
+        ruledist(lhs) = simple_product_model(lhs, dists)
+        seq2start(seq) = (NT(seq[end][1]), NT(1//1))
+        ProbabilisticGrammar(parser, dists, ruledist, seq2start)
     end
 
     @probprog function simple_product_model(lhs, dists)
         harmony_lhs, rhythm_lhs = lhs
-        harmony_rule ~ dists.harmony_rule(harmony_lhs)
+        harmony_rule ~ dists.harmony_rule[harmony_lhs]
         if istermination(harmony_rule)
             rhythm_rule = rhythm_lhs --> T(rhythm_lhs)
         else
@@ -276,36 +285,32 @@ begin # SimpleProductModel
         ratio = rhs(rhythm_rule)[1].val / lhs(rhythm_rule).val
         (; harmony_rule, ratio)
     end
-
-    function parser(model::SimpleProductModel)
-        ProductParser(
-            parser(SimpleHarmonyModel(model.rulekinds)), 
-            parser(SimpleRhythmModel(model.max_denom)),
-        )
-    end
 end
 
 ###################
 # Model execution #
 ###################
 
-model = SimpleHarmonyModel([:rightheaded])
-grammar = treebank_grammar(model);
-@time accs = map(trees(model)) do tree
+grammar = simple_harmony_grammar(rulekinds=[:rightheaded]);
+trees = [tune["harmony_tree"] for tune in treebank];
+train_on_trees!(grammar, trees);
+@time accs = map(trees) do tree
     prediction = predict_tree(grammar, leaflabels(tree))
     tree_similarity(tree, prediction)
 end; mean(accs)
 
-model = SimpleRhythmModel(100)
-grammar = treebank_grammar(model);
-@time accs = map(trees(model)) do tree
+grammar = simple_rhythm_grammar();
+trees = [tune["rhythm_tree"] for tune in treebank];
+train_on_trees!(grammar, trees);
+@time accs = map(trees) do tree
     prediction = predict_tree(grammar, leaflabels(tree))
     tree_similarity(tree, prediction)
 end; mean(accs)
 
-model = SimpleProductModel([:rightheaded], 100)
-grammar = treebank_grammar(model);
-@time accs = map(trees(model)) do tree
+grammar = simple_product_grammar(rulekinds=[:rightheaded]);
+trees = [tune["product_tree"] for tune in treebank];
+train_on_trees!(grammar, trees);
+@time accs = map(trees) do tree
     prediction = predict_tree(grammar, leaflabels(tree))
     tree_similarity(tree, prediction)
 end; mean(accs)
