@@ -10,6 +10,7 @@ begin # imports and constants
     using SimpleProbabilisticPrograms: SimpleProbabilisticPrograms, logpdf, symdircat, DirCat, @probprog, probprogtype, Dirac, ProbProg
     using Pitches: Pitches
     using Statistics: mean
+    using Setfield: @set
 
     tunes, treebank = JHT.load_tunes_and_treebank();
 
@@ -35,8 +36,23 @@ begin # ProbabilisticGrammar
         return grammar
     end
 
-    function use_map_params!(grammar::ProbabilisticGrammar)
+    # use maximum a priori parameters
+    function use_map_params(grammar::ProbabilisticGrammar)
+        map_dists = map(use_map_params, grammar.dists)
+        @set grammar.dists = map_dists
+    end
 
+    function use_map_params(dict::Dict)
+        Dict(k => use_map_params(v) for (k, v) in dict)
+    end
+
+    function use_map_params(dc::DirCat)
+        if !dc.logpdfs_uptodate
+            SimpleProbabilisticPrograms.update_logpdfs!(dc)
+        end
+        s = sum(values(dc.pscounts))
+        map_params = Dict(x => c/s for (x, c) in dc.pscounts)
+        GenericCategorical(map_params)
     end
 
     function predict_tree(grammar::ProbabilisticGrammar, seq)
@@ -46,6 +62,27 @@ begin # ProbabilisticGrammar
         logprob, derivation = getbestderivation(scoring, forest)
         derivation2tree(derivation)
     end
+end
+
+begin # generic categorical
+    import Base: rand
+    import Distributions: logpdf
+    using Random: AbstractRNG
+
+    struct GenericCategorical{T}
+        probs :: Dict{T, Float64}
+    end
+
+    function rand(rng::AbstractRNG, gc::GenericCategorical)
+        r = rand(rng)
+        q = 0
+        for (x, p) in gc.probs
+            q += p
+            if q > r; return x; end
+        end
+    end
+
+    logpdf(gc::GenericCategorical, x) = log(gc.probs[x])
 end
 
 begin # simple harmony grammar
