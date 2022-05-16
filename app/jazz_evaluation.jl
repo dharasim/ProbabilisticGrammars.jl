@@ -59,3 +59,8 @@ treebankgrammar(trees) =
 mean(prediction_accs(treebankgrammar(trees), trees))
 mean(prediction_accs_crossval(treebankgrammar, trees, 15))
 
+trees = [tune["product_tree"] for tune in treebank];
+treebankgrammar(trees) = 
+    use_map_params(train_on_trees!(transpinv_product_grammar(rulekinds=[:rightheaded]), trees))
+mean(prediction_accs(treebankgrammar(trees), trees))
+mean(prediction_accs_crossval(treebankgrammar, trees, 15))

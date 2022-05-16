@@ -186,14 +186,6 @@ begin # transpositionally invariant grammar
     end
 end
 
-tuple(Pitches.parsespelledpitch("C")) .+ all_intervals(-12, 12)
-
-# nt = NT(first(all_chords))
-# rulekinds = [:rightheaded, :leftheaded]
-# d = transpinv_harmony_model(nt, dists, rulekinds)
-# rule = rand(d)
-# @time logpdf(d, rule)
-
 begin # RhythmParser
     struct RhythmParser
         splitratios :: Set{Rational{Int}}
@@ -352,4 +344,45 @@ begin # simple product grammar
         ratio = rhs(rhythm_rule)[1].val / lhs(rhythm_rule).val
         (; harmony_rule, ratio)
     end
+end
+
+# transpinv product grammar
+function transpinv_product_grammar(; 
+        rulekinds=[:leftheaded, :rightheaded], 
+        splitratios = ratios_max_denom(100),
+    )
+    h_rules = harmony_rules(rulekinds)
+    parser = ProductParser(
+        CNFP(h_rules),
+        RhythmParser(splitratios),
+    )
+    ints = all_intervals(-12, 12)
+    dists = (
+        terminate   = symdircat([true, false], 1),
+        interval    = Dict(f => symdircat(ints, 0.1) for f in all_forms),
+        form        = Dict((i, f) => symdircat(all_forms, 0.1) for i in ints for f in all_forms),
+        rightheaded = symdircat([true, false], 0.1),
+        ratio = symdircat(splitratios, 0.1),
+    )
+    ruledist(lhs) = transpinv_product_model(lhs, dists, rulekinds)
+    seq2start(seq) = (NT(seq[end][1]), NT(1//1))
+    ProbabilisticGrammar(parser, dists, ruledist, seq2start)
+end
+
+@probprog function transpinv_product_model(lhs, dists, rulekinds)
+    harmony_lhs, rhythm_lhs = lhs
+    harmony_rule ~ transpinv_harmony_model(harmony_lhs, dists, rulekinds)
+    if istermination(harmony_rule)
+        rhythm_rule = rhythm_lhs --> T(rhythm_lhs)
+    else
+        ratio ~ dists.ratio
+        rhythm_rule = splitrule(rhythm_lhs, ratio)
+    end
+    return product_rule(harmony_rule, rhythm_rule)
+end
+
+function recover_trace(::probprogtype(transpinv_product_model), product_rule)
+    harmony_rule, rhythm_rule = product_rule_components(product_rule)
+    ratio = rhs(rhythm_rule)[1].val / lhs(rhythm_rule).val
+    (; harmony_rule, ratio)
 end
