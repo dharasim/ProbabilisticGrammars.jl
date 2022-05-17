@@ -292,9 +292,7 @@ begin # transpinv product grammar
             splitratios = ratios_max_denom(100),
         )
         h_rules = harmony_rules(rulekinds)
-        parser = ProductParser(
-            CNFP(h_rules),
-            RhythmParser(splitratios),
+        parser = ProductParser(CNFP(h_rules), RhythmParser(splitratios),
         )
         ints = all_intervals(-12, 12)
         dists = (
@@ -408,6 +406,48 @@ function recover_trace(::probprogtype(regularized_product_model), rule)
     (; harmony_rule, rhythm_rule)
 end
 
-# m = regularized_product_model((NT(first(all_chords)), NT(1//2)), dists)
+
+
+# regularized transpinv grammar
+function regularized_transpinv_grammar(;
+        rulekinds = [:rightheaded],
+        lvlaccept = 0.75,
+        maxlvl = 8,
+    )
+    h_rules = harmony_rules(rulekinds)
+    splitratios = mapreduce(proper_ratios_of_calkin_wilf_level, union, 1:maxlvl)
+    parser = ProductParser(CNFP(h_rules), RhythmParser(splitratios))
+
+    ints = all_intervals(-12, 12)
+    dists = (
+        terminate   = symdircat([true, false], 1),
+        interval    = Dict(f => symdircat(ints, 0.1) for f in all_forms),
+        form        = Dict((i, f) => symdircat(all_forms, 0.1) for i in ints for f in all_forms),
+        rightheaded = symdircat([true, false], 0.1),
+        levelm1     = Geometric(1 - lvlaccept),
+        ratio       = symdircat.(proper_ratios_of_calkin_wilf_level.(1:maxlvl), 0.1),
+    )
+    ruledist(lhs) = regularized_transpinv_model(lhs, dists, rulekinds)
+    seq2start(seq) = (NT(seq[end][1]), NT(1//1))
+    ProbabilisticGrammar(parser, dists, ruledist, seq2start)
+end
+
+@probprog function regularized_transpinv_model(lhs, dists, rulekinds)
+    harmony_lhs, rhythm_lhs = lhs
+    harmony_rule ~ transpinv_harmony_model(harmony_lhs, dists, rulekinds)
+    if istermination(harmony_rule)
+        rhythm_rule = rhythm_lhs --> T(rhythm_lhs)
+    else
+        rhythm_rule ~ regularized_split_model(rhythm_lhs, dists)
+    end
+    return product_rule(harmony_rule, rhythm_rule)
+end
+
+function recover_trace(::probprogtype(regularized_transpinv_model), product_rule)
+    harmony_rule, rhythm_rule = product_rule_components(product_rule)
+    (; harmony_rule, rhythm_rule)
+end
+
+# m = regularized_transpinv_model((NT(first(all_chords)), NT(1//2)), dists, rulekinds)
 # x = rand(m)
 # @time logpdf(m, x)
