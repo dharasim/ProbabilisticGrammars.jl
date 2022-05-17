@@ -64,6 +64,18 @@ mean(prediction_accs(grammar, trees))
 
 
 
+trees = [tune["rhythm_tree"] for tune in treebank];
+treebankgrammar(trees) = use_map_params(train_on_trees!(regularized_rhythm_grammar(), trees))
+mean(prediction_accs(treebankgrammar(trees), trees))
+mean(prediction_accs_crossval(treebankgrammar, trees, 15))
+
+grammar = runvi(leaflabels.(trees), epochs=3) do 
+    regularized_rhythm_grammar()
+end;
+mean(prediction_accs(grammar, trees))
+
+
+
 trees = [tune["harmony_tree"] for tune in treebank];
 treebankgrammar(trees) = 
     use_map_params(train_on_trees!(transpinv_harmony_grammar(rulekinds=[:rightheaded]), trees))

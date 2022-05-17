@@ -6,6 +6,7 @@ using LogProbs: LogProb
 using Setfield: @set
 using DataStructures: counter, Accumulator
 using ProgressMeter: Progress, progress_map
+using Distributions: Geometric
 using SimpleProbabilisticPrograms: SimpleProbabilisticPrograms
 using SimpleProbabilisticPrograms: logpdf, logvarpdf, insupport, add_obs!, DirCat, symdircat
 
@@ -679,14 +680,18 @@ function train_on_trees!(grammar::ProbabilisticGrammar, trees)
     return grammar
 end
 
+function predict_tree(grammar::ProbabilisticGrammar, seq)
+    scoring = BestDerivationScoring(grammar.ruledist, grammar.parser)
+    chart   = chartparse(grammar.parser, scoring, seq)
+    forest  = chart[1, end][grammar.seq2start(seq)]
+    logprob, derivation = getbestderivation(scoring, forest)
+    derivation2tree(derivation)
+end
+
 # use maximum a priori parameters
 function use_map_params(grammar::ProbabilisticGrammar)
     map_dists = map(use_map_params, grammar.dists)
     @set grammar.dists = map_dists
-end
-
-function use_map_params(dict::Dict)
-    Dict(k => use_map_params(v) for (k, v) in dict)
 end
 
 function use_map_params(dc::DirCat)
@@ -698,13 +703,9 @@ function use_map_params(dc::DirCat)
     GenericCategorical(map_params)
 end
 
-function predict_tree(grammar::ProbabilisticGrammar, seq)
-    scoring = BestDerivationScoring(grammar.ruledist, grammar.parser)
-    chart   = chartparse(grammar.parser, scoring, seq)
-    forest  = chart[1, end][grammar.seq2start(seq)]
-    logprob, derivation = getbestderivation(scoring, forest)
-    derivation2tree(derivation)
-end
+use_map_params(dict::Dict) = Dict(k => use_map_params(v) for (k, v) in dict)
+use_map_params(v::Vector) = use_map_params.(v)
+use_map_params(dist::Geometric) = dist
 
 #########################
 # Variational inference #
@@ -741,13 +742,5 @@ function runvi(
     end
     return grammar
 end
-# 
-# # run variational inference with automatic prior initialization
-# function runvi(
-#     epochs, mk_prior, grammar::Grammar, other_estimation_args...;
-#     showprogress=true
-#   )
-#   runvi(epochs, mk_prior, mk_prior(), grammar, other_estimation_args...; showprogress)
-# end
 
 end # module

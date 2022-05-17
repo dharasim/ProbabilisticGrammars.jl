@@ -16,7 +16,7 @@
 - [x] reproduce supervised results with cross validation
 - [x] implement variational inference
 - [x] reproduce unsupervised results (harmony, rhythm, simple product)
-- [ ] implement regularized rhythm grammar
+- [x] implement regularized rhythm grammar
 - [ ] implement regularized product grammar
 - [x] modify probabilistic grammar struct to include field `dists`
 - [/] try optimizing allocation simple probprogs (no tuple destructuring in `sample`)
