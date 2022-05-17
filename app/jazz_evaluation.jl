@@ -104,6 +104,29 @@ mean(prediction_accs(grammar, trees))
 
 trees = [tune["product_tree"] for tune in treebank];
 treebankgrammar(trees) = 
+    use_map_params(train_on_trees!(regularized_product_grammar(rulekinds=[:rightheaded]), trees))
+mean(prediction_accs(treebankgrammar(trees), trees))
+mean(prediction_accs_crossval(treebankgrammar, trees, 15))
+
+grammar = runvi(leaflabels.(trees), epochs=5) do 
+    regularized_product_grammar(rulekinds=[:rightheaded], lvlaccept=0.78)
+end;
+mean(prediction_accs(grammar, trees))
+
+mean(prediction_accs(grammar, trees))
+
+mean(prediction_accs(grammar, trees))
+
+mean(prediction_accs(grammar, trees))
+
+# (5 epochs each)
+# 0.75 | 0.6089
+# 0.76 | 0.6122
+# 0.77 | 0.6075
+# 0.78 | 0.6034
+
+trees = [tune["product_tree"] for tune in treebank];
+treebankgrammar(trees) = 
     use_map_params(train_on_trees!(transpinv_product_grammar(rulekinds=[:rightheaded]), trees))
 mean(prediction_accs(treebankgrammar(trees), trees))
 mean(prediction_accs_crossval(treebankgrammar, trees, 15))
