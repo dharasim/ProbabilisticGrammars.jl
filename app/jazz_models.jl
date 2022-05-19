@@ -79,7 +79,7 @@ begin # transpositionally invariant grammar
             terminate   = symdircat([true, false], 1),
             interval    = Dict(f => symdircat(ints, 0.1) for f in all_forms),
             form        = Dict((i, f) => symdircat(all_forms, 0.1) for i in ints for f in all_forms),
-            rightheaded = symdircat([true, false], 0.1),
+            rightheaded = symdircat([true, false], 1),
         )
         ruledist(lhs) = transpinv_harmony_model(lhs, dists, rulekinds)
         seq2start(seq) = NT(seq[end])
@@ -88,13 +88,11 @@ begin # transpositionally invariant grammar
 
     @probprog function transpinv_harmony_model(lhs, dists, rulekinds)
         terminate ~ dists.terminate
-        if terminate 
-            return lhs --> T(lhs)
-        end
-
+        if terminate; return lhs --> T(lhs) end
         interval ~ dists.interval[lhs.val.form]
         form     ~ dists.form[interval, lhs.val.form]
         chord    = NT(JHT.Chord(lhs.val.root + interval, form))
+
         if lhs == chord
             return lhs --> lhs⋅lhs
         elseif :rightheaded in rulekinds && :leftheaded in rulekinds
@@ -368,84 +366,85 @@ begin # regularized rhythm grammar
     end
 end
 
-# regularized product grammar
-function regularized_product_grammar(;
-        rulekinds = [:rightheaded],
-        concentration = 0.1,
-        lvlaccept = 0.75,
-        maxlvl = 8,
-    )
-    h_rules = harmony_rules(rulekinds)
-    splitratios = mapreduce(proper_ratios_of_calkin_wilf_level, union, 1:maxlvl)
-    parser = ProductParser(CNFP(h_rules), RhythmParser(splitratios))
+begin # regularized product grammar
+    function regularized_product_grammar(;
+            rulekinds = [:rightheaded],
+            concentration = 0.1,
+            lvlaccept = 0.75,
+            maxlvl = 8,
+        )
+        h_rules = harmony_rules(rulekinds)
+        splitratios = mapreduce(proper_ratios_of_calkin_wilf_level, union, 1:maxlvl)
+        parser = ProductParser(CNFP(h_rules), RhythmParser(splitratios))
 
-    dircat(h_nt) = symdircat([r for r in h_rules if lhs(r)==h_nt], concentration)
-    dists = (
-        harmony_rule = Dict(h_nt => dircat(h_nt) for h_nt in NT.(all_chords)),
-        levelm1      = Geometric(1 - lvlaccept),
-        ratio        = symdircat.(proper_ratios_of_calkin_wilf_level.(1:maxlvl), 0.1),
-    )
-    ruledist(lhs) = regularized_product_model(lhs, dists)
-    seq2start(seq) = (NT(seq[end][1]), NT(1//1))
-    ProbabilisticGrammar(parser, dists, ruledist, seq2start)
-end
-
-@probprog function regularized_product_model(lhs, dists)
-    harmony_lhs, rhythm_lhs = lhs
-    harmony_rule ~ dists.harmony_rule[harmony_lhs]
-    if istermination(harmony_rule)
-        rhythm_rule = rhythm_lhs --> T(rhythm_lhs)
-    else
-        rhythm_rule ~ regularized_split_model(rhythm_lhs, dists)
+        dircat(h_nt) = symdircat([r for r in h_rules if lhs(r)==h_nt], concentration)
+        dists = (
+            harmony_rule = Dict(h_nt => dircat(h_nt) for h_nt in NT.(all_chords)),
+            levelm1      = Geometric(1 - lvlaccept),
+            ratio        = symdircat.(proper_ratios_of_calkin_wilf_level.(1:maxlvl), 0.1),
+        )
+        ruledist(lhs) = regularized_product_model(lhs, dists)
+        seq2start(seq) = (NT(seq[end][1]), NT(1//1))
+        ProbabilisticGrammar(parser, dists, ruledist, seq2start)
     end
-    return product_rule(harmony_rule, rhythm_rule)
-end
 
-function recover_trace(::probprogtype(regularized_product_model), rule)
-    harmony_rule, rhythm_rule = product_rule_components(rule)
-    (; harmony_rule, rhythm_rule)
-end
-
-
-
-# regularized transpinv grammar
-function regularized_transpinv_grammar(;
-        rulekinds = [:rightheaded],
-        lvlaccept = 0.75,
-        maxlvl = 8,
-    )
-    h_rules = harmony_rules(rulekinds)
-    splitratios = mapreduce(proper_ratios_of_calkin_wilf_level, union, 1:maxlvl)
-    parser = ProductParser(CNFP(h_rules), RhythmParser(splitratios))
-
-    ints = all_intervals(-12, 12)
-    dists = (
-        terminate   = symdircat([true, false], 1),
-        interval    = Dict(f => symdircat(ints, 0.1) for f in all_forms),
-        form        = Dict((i, f) => symdircat(all_forms, 0.1) for i in ints for f in all_forms),
-        rightheaded = symdircat([true, false], 0.1),
-        levelm1     = Geometric(1 - lvlaccept),
-        ratio       = symdircat.(proper_ratios_of_calkin_wilf_level.(1:maxlvl), 0.1),
-    )
-    ruledist(lhs) = regularized_transpinv_model(lhs, dists, rulekinds)
-    seq2start(seq) = (NT(seq[end][1]), NT(1//1))
-    ProbabilisticGrammar(parser, dists, ruledist, seq2start)
-end
-
-@probprog function regularized_transpinv_model(lhs, dists, rulekinds)
-    harmony_lhs, rhythm_lhs = lhs
-    harmony_rule ~ transpinv_harmony_model(harmony_lhs, dists, rulekinds)
-    if istermination(harmony_rule)
-        rhythm_rule = rhythm_lhs --> T(rhythm_lhs)
-    else
-        rhythm_rule ~ regularized_split_model(rhythm_lhs, dists)
+    @probprog function regularized_product_model(lhs, dists)
+        harmony_lhs, rhythm_lhs = lhs
+        harmony_rule ~ dists.harmony_rule[harmony_lhs]
+        if istermination(harmony_rule)
+            rhythm_rule = rhythm_lhs --> T(rhythm_lhs)
+        else
+            rhythm_rule ~ regularized_split_model(rhythm_lhs, dists)
+        end
+        return product_rule(harmony_rule, rhythm_rule)
     end
-    return product_rule(harmony_rule, rhythm_rule)
+
+    function recover_trace(::probprogtype(regularized_product_model), rule)
+        harmony_rule, rhythm_rule = product_rule_components(rule)
+        (; harmony_rule, rhythm_rule)
+    end
 end
 
-function recover_trace(::probprogtype(regularized_transpinv_model), product_rule)
-    harmony_rule, rhythm_rule = product_rule_components(product_rule)
-    (; harmony_rule, rhythm_rule)
+
+begin # regularized transpinv grammar
+    function regularized_transpinv_grammar(;
+            rulekinds = [:rightheaded],
+            lvlaccept = 0.75,
+            maxlvl = 8,
+        )
+        h_rules = harmony_rules(rulekinds)
+        splitratios = mapreduce(proper_ratios_of_calkin_wilf_level, union, 1:maxlvl)
+        parser = ProductParser(CNFP(h_rules), RhythmParser(splitratios))
+
+        ints = all_intervals(-12, 12)
+        dists = (
+            terminate   = symdircat([true, false], 1),
+            interval    = Dict(f => symdircat(ints, 0.1) for f in all_forms),
+            form        = Dict((i, f) => symdircat(all_forms, 0.1) for i in ints for f in all_forms),
+            rightheaded = symdircat([true, false], 0.1),
+            levelm1     = Geometric(1 - lvlaccept),
+            ratio       = symdircat.(proper_ratios_of_calkin_wilf_level.(1:maxlvl), 0.1),
+        )
+        ruledist(lhs) = regularized_transpinv_model(lhs, dists, rulekinds)
+        seq2start(seq) = (NT(seq[end][1]), NT(1//1))
+        ProbabilisticGrammar(parser, dists, ruledist, seq2start)
+    end
+
+    @probprog function regularized_transpinv_model(lhs, dists, rulekinds)
+        harmony_lhs, rhythm_lhs = lhs
+        harmony_rule ~ transpinv_harmony_model(harmony_lhs, dists, rulekinds)
+        if istermination(harmony_rule)
+            rhythm_rule = rhythm_lhs --> T(rhythm_lhs)
+        else
+            rhythm_rule ~ regularized_split_model(rhythm_lhs, dists)
+        end
+        return product_rule(harmony_rule, rhythm_rule)
+    end
+
+    function recover_trace(::probprogtype(regularized_transpinv_model), product_rule)
+        harmony_rule, rhythm_rule = product_rule_components(product_rule)
+        (; harmony_rule, rhythm_rule)
+    end
 end
 
 # m = regularized_transpinv_model((NT(first(all_chords)), NT(1//2)), dists, rulekinds)
