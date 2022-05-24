@@ -1,43 +1,185 @@
-include("jazz_models.jl")
+using Distributed: addprocs, workers, @everywhere, CachingPool, pmap
+addprocs(5; exeflags="--project")
 
-begin
-    using ProgressMeter: @showprogress
-    using Random: randperm, default_rng
-    using Base.Iterators: flatten
+@everywhere include("jazz_models.jl")
+using .JazzModels
+@everywhere const JM = JazzModels
+
+@everywhere begin 
     using Logging: Logging
     Logging.disable_logging(Logging.Info)
+end
 
-    function prediction_accs(grammar, trees)
-        map(trees) do tree
-            prediction = predict_tree(grammar, leaflabels(tree))
-            tree_similarity(tree, prediction)
+using DataFrames: DataFrames, DataFrame
+
+@everywhere begin 
+    function model_trees(model)
+        treekey = if model.rhythm == "none"
+            "harmony_tree"
+        elseif model.harmony == "none"
+            "rhythm_tree"
+        else
+            "product_tree"
+        end
+        [tune[treekey] for tune in JM.treebank]
+    end
+
+    function rulekinds(model)
+        if model.headedness == "left"
+            [:leftheaded]
+        elseif model.headedness == "right"
+            [:rightheaded]
+        elseif model.headedness == "either"
+            [:leftheaded, :rightheaded]
+        else
+            error("$(model.headedness) is not a valid headedness")
         end
     end
 
-    ## k-fold cross validation for n data points
-    function cross_validation_index_split(num_folds, num_total, rng=default_rng())
-    num_perfold = ceil(Int, num_total/num_folds)
-    num_lastfold = num_total - (num_folds-1) * num_perfold
-    fold_lenghts = [fill(num_perfold, num_folds-1); num_lastfold]
-    fold_ends = accumulate(+, fold_lenghts)
-    fold_starts = fold_ends - fold_lenghts .+ 1
-    shuffled_idxs = randperm(rng, num_total)
-    test_indices = [shuffled_idxs[i:j] for (i,j) in zip(fold_starts,fold_ends)]
-    train_indices = [setdiff(1:num_total, idxs) for idxs in test_indices]
-    return collect(zip(test_indices, train_indices))
+    function mk_grammar(model)
+        if     model.harmony == "simple" && model.rhythm == "none"
+            JM.simple_harmony_grammar(rulekinds=rulekinds(model))
+        elseif model.harmony == "transpinv" && model.rhythm == "none"
+            JM.transpinv_harmony_grammar(rulekinds=rulekinds(model))
+        #
+        elseif model.harmony == "none" && model.rhythm == "simple"
+            JM.simple_rhythm_grammar()
+        elseif model.harmony == "none" && model.rhythm == "regularized"
+            JM.regularized_rhythm_grammar()
+        #
+        elseif model.harmony == "simple" && model.rhythm == "simple"
+            JM.simple_product_grammar(rulekinds=rulekinds(model))
+        elseif model.harmony == "transpinv" && model.rhythm == "simple"
+            JM.transpinv_product_grammar(rulekinds=rulekinds(model))
+        elseif model.harmony == "simple" && model.rhythm == "regularized"
+            JM.regularized_product_grammar(rulekinds=rulekinds(model))
+        elseif model.harmony == "transpinv" && model.rhythm == "regularized"
+            JM.regularized_transpinv_grammar(rulekinds=rulekinds(model))
+        else
+            error("no grammar implemented for model $model")
+        end
     end
 
-    function prediction_accs_crossval(treebankgrammar, trees, num_folds)
-        index_splits = cross_validation_index_split(num_folds, length(trees))
-        accss = map(index_splits) do (test_idxs, train_idxs)
-            grammar = treebankgrammar(trees[train_idxs])
-            prediction_accs(grammar, trees[test_idxs])
+    function supervised_accs(model, index_splits; workers=workers())
+        wp = CachingPool(workers)
+        accs = pmap(wp, enumerate(index_splits)) do (foldid, (test_idxs, train_idxs))
+            train_trees = model_trees(model)[train_idxs]
+            grammar = JM.use_map_params(JM.train_on_trees!(mk_grammar(model), train_trees))
+            accs = JM.prediction_accs(grammar, model_trees(model)[test_idxs])
+            mode = "supervised"
+            [(; mode, treeid, foldid, acc) for (treeid, acc) in zip(test_idxs, accs)]
         end
-        collect(flatten(accss))
+        reduce(vcat, accs)
+    end
+
+    function unsupervised_accs(model, epochs, index_splits; workers=workers())
+        wp = CachingPool(workers)
+        accs = pmap(wp, enumerate(index_splits)) do (foldid, (test_idxs, train_idxs))
+            train_trees = model_trees(model)[train_idxs]
+            grammar = JM.runvi(() -> mk_grammar(model), JM.leaflabels.(train_trees); epochs, showprogress=false)
+            accs = JM.prediction_accs(grammar, model_trees(model)[test_idxs])
+            mode = "unsupervised"
+            [(; mode, treeid, foldid, acc) for (treeid, acc) in zip(test_idxs, accs)]
+        end
+        reduce(vcat, accs)
     end
 end
 
+model(harmony, rhythm, headedness) = (; harmony, rhythm, headedness)
+model(spec) = model(spec...)
+models = map(model, [
+    ("simple", "none", "right"),
+    ("simple", "none", "left"),
+    # ("simple", "none", "either"),
+    #
+    ("transpinv", "none", "right"),
+    ("transpinv", "none", "left"),
+    # ("transpinv", "none", "either"),
+    #
+    ("none", "simple", "none"),
+    ("none", "regularized", "none"),
+    # 
+    ("simple", "simple", "right"),
+    ("simple", "simple", "left"),
+    # ("simple", "simple", "either"),
+    #
+    ("transpinv", "simple", "right"),
+    ("transpinv", "simple", "left"),
+    # ("transpinv", "simple", "either"),
+    # 
+    ("simple", "regularized", "right"),
+    ("simple", "regularized", "left"),
+    # ("simple", "regularized", "either"),
+    #
+    ("transpinv", "regularized", "right"),
+    ("transpinv", "regularized", "left"),
+    # ("transpinv", "regularized", "either"),
+])
 
+num_runs = 2
+num_epochs = 3
+num_trees = 4
+num_folds = 2
+
+JM.cross_validation_index_split(num_folds, num_trees)
+
+using Dates: Dates
+
+crossval_data = DataFrame(
+    mapreduce(vcat, 1:num_runs) do runid
+        @show runid
+        index_splits = JM.cross_validation_index_split(num_folds, num_trees)
+        mapreduce(vcat, models) do model
+            time = Dates.format(Dates.now(), "HH:MM:SS") 
+            @show model, time
+            vcat(
+                map(supervised_accs(model, index_splits)) do accs
+                    (; runid, model..., accs...)
+                end,
+                map(unsupervised_accs(model, num_epochs, index_splits)) do accs
+                    (; runid, model..., accs...)
+                end,
+            )
+        end
+    end
+)[:, [:harmony, :rhythm, :headedness, :mode, :runid, :treeid, :foldid, :acc]]
+
+using CSV: CSV
+CSV.write("app/crossval_data.csv", crossval_data)
+
+
+
+
+
+# let model = model("simple", "simple", "either")
+#     train_trees = model_trees(model)
+#     grammar = JM.runvi(() -> mk_grammar(model), JM.leaflabels.(train_trees); epochs=1, showprogress=false);
+#     tic = time_ns()
+#     accs = JM.prediction_accs(grammar, model_trees(model))
+#     toc = time_ns()
+#     (toc - tic) / 1_000_000_000
+# end
+# 
+# 
+# let model = model("simple", "simple", "either")
+#     index_splits = JM.cross_validation_index_split(num_folds, num_trees)
+#     wp = CachingPool(workers())
+#     tic = time_ns()
+#     pmap(wp, enumerate(index_splits)) do (foldid, (test_idxs, train_idxs))
+#         train_trees = model_trees(model)[train_idxs]
+#         grammar = JM.runvi(() -> mk_grammar(model), JM.leaflabels.(train_trees); epochs=1, showprogress=false)
+#         accs = JM.prediction_accs(grammar, model_trees(model)[test_idxs])
+#         # mode = "unsupervised"
+#         # [(; mode, treeid, foldid, acc) for (treeid, acc) in zip(test_idxs, accs)]
+#     end
+#     toc = time_ns()
+#     (toc - tic) / 1_000_000_000
+# end
+# 
+# 
+# 
+# 
+# 
 
 trees = [tune["harmony_tree"] for tune in treebank];
 treebankgrammar(trees) = 
@@ -48,7 +190,7 @@ mean(prediction_accs_crossval(treebankgrammar, trees, 15))
 grammar = runvi(leaflabels.(trees), epochs=3) do 
     simple_harmony_grammar(rulekinds=[:rightheaded])
 end;
-mean(prediction_accs(grammar, trees))
+mean(prediction_accs(use_map_params(grammar), trees))
 
 
 
@@ -127,13 +269,10 @@ treebankgrammar(trees) =
 mean(prediction_accs(treebankgrammar(trees), trees))
 mean(prediction_accs_crossval(treebankgrammar, trees, 15))
 
-for a in 0.70:0.01:0.85
-    grammar = runvi(leaflabels.(trees), epochs=5, showprogress=false) do 
-        regularized_transpinv_grammar(rulekinds=[:rightheaded], lvlaccept=a)
-    end;
-    m = 
-    println(a, " | ", mean(prediction_accs(use_map_params(grammar), trees)))
-end
+grammar = runvi(leaflabels.(trees), epochs=5, showprogress=false) do 
+    regularized_transpinv_grammar(rulekinds=[:rightheaded])
+end;
+mean(prediction_accs(use_map_params(grammar), trees))
 
 # (5 epochs each)
 # 0.70 | 0.6119014428476931
@@ -164,3 +303,4 @@ grammar = runvi(leaflabels.(trees), epochs=3) do
     transpinv_product_grammar(rulekinds=[:rightheaded])
 end;
 mean(prediction_accs(grammar, trees))
+

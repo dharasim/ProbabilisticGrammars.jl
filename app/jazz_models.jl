@@ -1,3 +1,5 @@
+module JazzModels
+
 include("JazzTreebank.jl")
 include("calkin_wilf.jl")
 
@@ -12,6 +14,8 @@ begin # imports and constants
     using Pitches: Pitches
     using Statistics: mean
     using Distributions: Geometric
+    using Random: randperm, default_rng
+    using Base.Iterators: flatten
     using Setfield: @set
 
     tunes, treebank = JHT.load_tunes_and_treebank();
@@ -24,6 +28,37 @@ begin # imports and constants
         for form in all_forms
     )
 end 
+
+begin # utils
+    function prediction_accs(grammar, trees)
+        map(trees) do tree
+            prediction = predict_tree(grammar, leaflabels(tree))
+            tree_similarity(tree, prediction)
+        end
+    end
+
+    ## k-fold cross validation for n data points
+    function cross_validation_index_split(num_folds, num_total, rng=default_rng())
+        num_perfold = ceil(Int, num_total/num_folds)
+        num_lastfold = num_total - (num_folds-1) * num_perfold
+        fold_lenghts = [fill(num_perfold, num_folds-1); num_lastfold]
+        fold_ends = accumulate(+, fold_lenghts)
+        fold_starts = fold_ends - fold_lenghts .+ 1
+        shuffled_idxs = randperm(rng, num_total)
+        test_indices = [shuffled_idxs[i:j] for (i,j) in zip(fold_starts,fold_ends)]
+        train_indices = [setdiff(1:num_total, idxs) for idxs in test_indices]
+        return collect(zip(test_indices, train_indices))
+    end
+
+    function prediction_accs_crossval(treebankgrammar, trees, num_folds)
+        index_splits = cross_validation_index_split(num_folds, length(trees))
+        accss = map(index_splits) do (test_idxs, train_idxs)
+            grammar = treebankgrammar(trees[train_idxs])
+            prediction_accs(grammar, trees[test_idxs])
+        end
+        collect(flatten(accss))
+    end
+end
 
 begin # simple harmony grammar
     function harmony_rules(rulekinds)
@@ -55,7 +90,7 @@ begin # simple harmony grammar
             rule = Dict(nt => dircat(nt) for nt in NT.(all_chords)),
         )
         ruledist(lhs) = simple_harmony_model(lhs, dists)
-        seq2start(seq) = NT(seq[end])
+        seq2start(seq) = :rightheaded in rulekinds ? NT(seq[end]) : NT(seq[1])
         ProbabilisticGrammar(parser, dists, ruledist, seq2start)
     end
 
@@ -82,7 +117,7 @@ begin # transpositionally invariant grammar
             rightheaded = symdircat([true, false], 1),
         )
         ruledist(lhs) = transpinv_harmony_model(lhs, dists, rulekinds)
-        seq2start(seq) = NT(seq[end])
+        seq2start(seq) = :rightheaded in rulekinds ? NT(seq[end]) : NT(seq[1])
         ProbabilisticGrammar(parser, dists, ruledist, seq2start)
     end
 
@@ -261,7 +296,7 @@ begin # simple product grammar
             ratio = symdircat(splitratios, 0.1),
         )
         ruledist(lhs) = simple_product_model(lhs, dists)
-        seq2start(seq) = (NT(seq[end][1]), NT(1//1))
+        seq2start(seq) = :rightheaded in rulekinds ? (NT(seq[end][1]), NT(1//1)) : (NT(seq[1][1]), NT(1//1))
         ProbabilisticGrammar(parser, dists, ruledist, seq2start)
     end
 
@@ -301,7 +336,7 @@ begin # transpinv product grammar
             ratio = symdircat(splitratios, 0.1),
         )
         ruledist(lhs) = transpinv_product_model(lhs, dists, rulekinds)
-        seq2start(seq) = (NT(seq[end][1]), NT(1//1))
+        seq2start(seq) = :rightheaded in rulekinds ? (NT(seq[end][1]), NT(1//1)) : (NT(seq[1][1]), NT(1//1))
         ProbabilisticGrammar(parser, dists, ruledist, seq2start)
     end
 
@@ -325,7 +360,7 @@ begin # transpinv product grammar
 end
 
 begin # regularized rhythm grammar
-    function regularized_rhythm_grammar(; maxlvl=8, lvlaccept=0.75)
+    function regularized_rhythm_grammar(; maxlvl=8, lvlaccept=0.80)
         splitratios = mapreduce(proper_ratios_of_calkin_wilf_level, union, 1:maxlvl)
         parser = RhythmParser(splitratios)
         dists = (
@@ -333,12 +368,12 @@ begin # regularized rhythm grammar
             levelm1   = Geometric(1 - lvlaccept),
             ratio     = symdircat.(proper_ratios_of_calkin_wilf_level.(1:maxlvl), 0.1),
         )
-        ruledist(lhs) = regularized_rhythm_model(lhs, dists)
+        ruledist(lhs) = regularized_rhythm_model(lhs, dists, maxlvl)
         seq2start(seq) = NT(1//1)
         ProbabilisticGrammar(parser, dists, ruledist, seq2start)
     end
 
-    @probprog function regularized_split_model(lhs, dists)
+    @probprog function regularized_split_model(lhs, dists, maxlvl)
         levelm1 ~ dists.levelm1 # level minus one
         level = min(levelm1 + 1, maxlvl) # hacky solution to reduce complexity
         ratio ~ dists.ratio[level]
@@ -351,12 +386,12 @@ begin # regularized rhythm grammar
         return (; ratio, levelm1)
     end
 
-    @probprog function regularized_rhythm_model(lhs, dists)
+    @probprog function regularized_rhythm_model(lhs, dists, maxlvl)
         terminate ~ dists.terminate
         if terminate
             return lhs --> T(lhs)
         else
-            splitrule ~ regularized_split_model(lhs, dists)
+            splitrule ~ regularized_split_model(lhs, dists, maxlvl)
             return splitrule
         end
     end
@@ -370,7 +405,7 @@ begin # regularized product grammar
     function regularized_product_grammar(;
             rulekinds = [:rightheaded],
             concentration = 0.1,
-            lvlaccept = 0.75,
+            lvlaccept = 0.80,
             maxlvl = 8,
         )
         h_rules = harmony_rules(rulekinds)
@@ -383,18 +418,18 @@ begin # regularized product grammar
             levelm1      = Geometric(1 - lvlaccept),
             ratio        = symdircat.(proper_ratios_of_calkin_wilf_level.(1:maxlvl), 0.1),
         )
-        ruledist(lhs) = regularized_product_model(lhs, dists)
-        seq2start(seq) = (NT(seq[end][1]), NT(1//1))
+        ruledist(lhs) = regularized_product_model(lhs, dists, maxlvl)
+        seq2start(seq) = :rightheaded in rulekinds ? (NT(seq[end][1]), NT(1//1)) : (NT(seq[1][1]), NT(1//1))
         ProbabilisticGrammar(parser, dists, ruledist, seq2start)
     end
 
-    @probprog function regularized_product_model(lhs, dists)
+    @probprog function regularized_product_model(lhs, dists, maxlvl)
         harmony_lhs, rhythm_lhs = lhs
         harmony_rule ~ dists.harmony_rule[harmony_lhs]
         if istermination(harmony_rule)
             rhythm_rule = rhythm_lhs --> T(rhythm_lhs)
         else
-            rhythm_rule ~ regularized_split_model(rhythm_lhs, dists)
+            rhythm_rule ~ regularized_split_model(rhythm_lhs, dists, maxlvl)
         end
         return product_rule(harmony_rule, rhythm_rule)
     end
@@ -405,11 +440,10 @@ begin # regularized product grammar
     end
 end
 
-
 begin # regularized transpinv grammar
     function regularized_transpinv_grammar(;
             rulekinds = [:rightheaded],
-            lvlaccept = 0.75,
+            lvlaccept = 0.8,
             maxlvl = 8,
         )
         h_rules = harmony_rules(rulekinds)
@@ -425,18 +459,18 @@ begin # regularized transpinv grammar
             levelm1     = Geometric(1 - lvlaccept),
             ratio       = symdircat.(proper_ratios_of_calkin_wilf_level.(1:maxlvl), 0.1),
         )
-        ruledist(lhs) = regularized_transpinv_model(lhs, dists, rulekinds)
-        seq2start(seq) = (NT(seq[end][1]), NT(1//1))
+        ruledist(lhs) = regularized_transpinv_model(lhs, dists, rulekinds, maxlvl)
+        seq2start(seq) = :rightheaded in rulekinds ? (NT(seq[end][1]), NT(1//1)) : (NT(seq[1][1]), NT(1//1))
         ProbabilisticGrammar(parser, dists, ruledist, seq2start)
     end
 
-    @probprog function regularized_transpinv_model(lhs, dists, rulekinds)
+    @probprog function regularized_transpinv_model(lhs, dists, rulekinds, maxlvl)
         harmony_lhs, rhythm_lhs = lhs
         harmony_rule ~ transpinv_harmony_model(harmony_lhs, dists, rulekinds)
         if istermination(harmony_rule)
             rhythm_rule = rhythm_lhs --> T(rhythm_lhs)
         else
-            rhythm_rule ~ regularized_split_model(rhythm_lhs, dists)
+            rhythm_rule ~ regularized_split_model(rhythm_lhs, dists, maxlvl)
         end
         return product_rule(harmony_rule, rhythm_rule)
     end
@@ -447,6 +481,4 @@ begin # regularized transpinv grammar
     end
 end
 
-# m = regularized_transpinv_model((NT(first(all_chords)), NT(1//2)), dists, rulekinds)
-# x = rand(m)
-# @time logpdf(m, x)
+end # module

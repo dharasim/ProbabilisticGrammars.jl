@@ -4,7 +4,7 @@ import Base: *, +, show, map, length, getindex, iterate, eltype, insert!, zero, 
 
 using LogProbs: LogProb
 using Setfield: @set
-using DataStructures: counter, Accumulator
+using DataStructures: counter, Accumulator, Queue, enqueue!, dequeue!
 using ProgressMeter: Progress, progress_map
 using Distributions: Geometric
 using SimpleProbabilisticPrograms: SimpleProbabilisticPrograms
@@ -565,9 +565,7 @@ function mulscores(sc::WDS, x, y)
   return ScoredFreeEntry(sc.store, *, x, y)
 end
 
-function sample_derivations(
-    sc::WDS, x::ScoredFreeEntry{S, V}, n::Int
-  ) where {S, V}
+function sample_derivations(sc::WDS, x::ScoredFreeEntry{S, V}, n::Int) where {S, V}
   vals = Vector{V}()
   for _ in 1:n
     sample_derivation!(vals, sc, x)
@@ -575,20 +573,41 @@ function sample_derivations(
   vals
 end
 
-function sample_derivation!(vals, sc::WDS, x::ScoredFreeEntry{S, V}) where {S, V}
-  if VAL ⊣ x 
-    push!(vals, x.value)
-  elseif ADD ⊣ x
-    goleft = rand(S) < sc.store[x.leftIndex].score / x.score
-    index = goleft ? x.leftIndex : x.rightIndex
-    sample_derivation!(vals, sc, sc.store[index])
-  elseif MUL ⊣ x
-    sample_derivation!(vals, sc, sc.store[x.leftIndex])
-    sample_derivation!(vals, sc, sc.store[x.rightIndex])
-  else # ZERO ⊣ x
-    error("cannot sample from zero")
-  end
+function sample_derivation!(vals::Vector, sc::WDS, x::ScoredFreeEntry{S, V}) where {S, V}
+    entries = Queue{ScoredFreeEntry{S, V}}()
+    enqueue!(entries, x)
+    while !isempty(entries)
+        x = dequeue!(entries)
+        if VAL ⊣ x 
+            push!(vals, x.value)
+        elseif ADD ⊣ x
+            goleft = rand(S) < sc.store[x.leftIndex].score / x.score
+            index = goleft ? x.leftIndex : x.rightIndex
+            enqueue!(entries, sc.store[index])
+        elseif MUL ⊣ x
+            enqueue!(entries, sc.store[x.leftIndex])
+            enqueue!(entries, sc.store[x.rightIndex])
+        else # ZERO ⊣ x
+            error("cannot sample from zero")
+        end
+    end
 end
+
+# # recursive implementation which caused stack overflow
+# function sample_derivation!(vals::Vector, sc::WDS, x::ScoredFreeEntry)
+#   if VAL ⊣ x 
+#     push!(vals, x.value)
+#   elseif ADD ⊣ x
+#     goleft = rand(S) < sc.store[x.leftIndex].score / x.score
+#     index = goleft ? x.leftIndex : x.rightIndex
+#     sample_derivation!(vals, sc, sc.store[index])
+#   elseif MUL ⊣ x
+#     sample_derivation!(vals, sc, sc.store[x.leftIndex])
+#     sample_derivation!(vals, sc, sc.store[x.rightIndex])
+#   else # ZERO ⊣ x
+#     error("cannot sample from zero")
+#   end
+# end
 
 ###########################
 # Best derivation scoring #
