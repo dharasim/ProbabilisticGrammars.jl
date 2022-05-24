@@ -118,8 +118,8 @@ models = map(model, [
 
 num_runs = 2
 num_epochs = 3
-num_trees = 4
-num_folds = 2
+num_trees = 150
+num_folds = 10
 
 JM.cross_validation_index_split(num_folds, num_trees)
 
@@ -147,7 +147,8 @@ crossval_data = DataFrame(
 using CSV: CSV
 CSV.write("app/crossval_data.csv", crossval_data)
 
-
+final_time = Dates.format(Dates.now(), "HH:MM:SS") 
+@show final_time
 
 
 
