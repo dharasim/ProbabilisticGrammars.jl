@@ -237,20 +237,20 @@ tree = derivation2tree(derivation)
 # Rule distributions #
 ######################
 
-# struct DirCatRuleDist{T}
-#     dists :: Dict{T, DirCat{Rule{T}}}
-# end
-# 
-# (d::DirCatRuleDist)(x) = d.dists[x]
-# 
-# function symdircat_ruledist(xs, rules, concentration=1.0)
-#     applicable_rules(x) = filter(r -> lhs(r) == x, rules)
-#     dists = Dict(
-#         x => symdircat(applicable_rules(x), concentration) 
-#         for x in xs
-#     )
-#     DirCatRuleDist(dists)
-# end
+struct DirCatRuleDist{T}
+    dists :: Dict{T, DirCat{Rule{T}}}
+end
+
+(d::DirCatRuleDist)(x) = d.dists[x]
+
+function symdircat_ruledist(xs, rules, concentration=1.0)
+    applicable_rules(x) = filter(r -> lhs(r) == x, rules)
+    dists = Dict(
+        x => symdircat(applicable_rules(x), concentration) 
+        for x in xs
+    )
+    DirCatRuleDist(dists)
+end
 
 import Base: rand
 import Distributions: logpdf

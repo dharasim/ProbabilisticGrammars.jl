@@ -11,8 +11,12 @@ using .JazzModels
 end
 
 using DataFrames: DataFrames, DataFrame
+const DF = DataFrames
+using Statistics: mean, std
+using CSV: CSV
+using Dates: Dates
 
-@everywhere begin 
+@everywhere begin # model methods
     function model_trees(model)
         treekey = if model.rhythm == "none"
             "harmony_tree"
@@ -85,6 +89,7 @@ using DataFrames: DataFrames, DataFrame
     end
 end
 
+# model specification
 model(harmony, rhythm, headedness) = (; harmony, rhythm, headedness)
 model(spec) = model(spec...)
 models = map(model, [
@@ -116,39 +121,110 @@ models = map(model, [
     # ("transpinv", "regularized", "either"),
 ])
 
+# simulation parameters
 num_runs = 2
 num_epochs = 3
 num_trees = 150
 num_folds = 10
 
+# double-check index split example
 JM.cross_validation_index_split(num_folds, num_trees)
 
-using Dates: Dates
+# crossval_data = DataFrame(
+#     mapreduce(vcat, 1:num_runs) do runid
+#         @show runid
+#         index_splits = JM.cross_validation_index_split(num_folds, num_trees)
+#         mapreduce(vcat, models) do model
+#             time = Dates.format(Dates.now(), "HH:MM:SS") 
+#             @show model, time
+#             vcat(
+#                 map(supervised_accs(model, index_splits)) do accs
+#                     (; runid, model..., accs...)
+#                 end,
+#                 map(unsupervised_accs(model, num_epochs, index_splits)) do accs
+#                     (; runid, model..., accs...)
+#                 end,
+#             )
+#         end
+#     end
+# )[:, [:harmony, :rhythm, :headedness, :mode, :runid, :treeid, :foldid, :acc]]
+# CSV.write("app/crossval_data.csv", crossval_data)
 
-crossval_data = DataFrame(
-    mapreduce(vcat, 1:num_runs) do runid
-        @show runid
-        index_splits = JM.cross_validation_index_split(num_folds, num_trees)
-        mapreduce(vcat, models) do model
-            time = Dates.format(Dates.now(), "HH:MM:SS") 
-            @show model, time
-            vcat(
-                map(supervised_accs(model, index_splits)) do accs
-                    (; runid, model..., accs...)
-                end,
-                map(unsupervised_accs(model, num_epochs, index_splits)) do accs
-                    (; runid, model..., accs...)
-                end,
-            )
+crossval_data = CSV.read("app/crossval_data.csv", DataFrame)
+
+acc_table = begin # create accuracy table
+    sem(xs) = std(xs) / sqrt(length(xs))
+    to_percent(xs) = round.(xs .* 100; digits=1)
+    to_acc_str(means, sems) = string.("\$", means, " \\pm ", sems, "\$")
+
+    headedness_order(headedness) = Dict("right" => 1, "left" => 2, "none" => 3)[headedness]
+    harmony_order(harmony) = Dict("simple" => 1, "transpinv" => 2, "none" => 3)[harmony]
+
+    crossval_data |>
+        df -> DF.groupby(df, [:mode, :harmony, :headedness, :rhythm]) |>
+        gd -> DF.combine(gd, :acc => mean, :acc => sem) |>
+        df -> DF.transform(df, :acc_mean => to_percent => :acc_mean) |>
+        df -> DF.transform(df, :acc_sem => to_percent => :acc_sem) |>
+        df -> DF.transform(df, [:acc_mean, :acc_sem] => to_acc_str => :accuracy) |>
+        df -> sort(df, [:mode, DF.order(:harmony, by=harmony_order), DF.order(:headedness, by=headedness_order)]) |>
+        df -> DF.unstack(df, [:mode, :harmony, :headedness], :rhythm, :accuracy)
+end
+
+println(acc_table)
+
+baseline_accs = begin # add baseline column to acc_table
+    using ProbabilisticGrammars: -->, ⋅, CNFP, chartparse, leaflabels, derivation2tree, tree_similarity
+    using ProbabilisticGrammars: WeightedDerivationScoring, sample_derivations, symdircat_ruledist
+
+    baseline_accs = begin
+        a, A = 'a', 'A'
+        rules = [A --> A⋅A, A --> a]
+        parser = CNFP(rules)
+        ruledist = symdircat_ruledist([A], rules)
+        scoring = WeightedDerivationScoring(ruledist, parser)
+
+        trees = map(tree -> map(label -> 'a', tree), model_trees(first(models)))
+        mapreduce(vcat, trees) do tree
+            chart = chartparse(parser, scoring, leaflabels(tree))
+            map(1:10) do _
+                prediction = derivation2tree(sample_derivations(scoring, chart[1, end][A], 1))
+                tree_similarity(tree, prediction)
+            end |> mean
         end
     end
-)[:, [:harmony, :rhythm, :headedness, :mode, :runid, :treeid, :foldid, :acc]]
 
-using CSV: CSV
-CSV.write("app/crossval_data.csv", crossval_data)
+    # baseline_acc = string("\$", to_percent(mean(baseline_accs)), " \\pm ", to_percent(sem(baseline_accs)), "\$")
+    # push!(acc_table, 
+    #     (mode="baseline", harmony="none", headedness="none", none=baseline_acc, simple=missing, regularized=missing)
+    # )
+end
 
-final_time = Dates.format(Dates.now(), "HH:MM:SS") 
-@show final_time
+baseline_df = DataFrame(treeid=1:150, acc=baseline_accs)
+CSV.write("app/baseline_data.csv", baseline_df)
+
+acc_table
+
+let df = acc_table # latex print accuracy table 
+    replace_missing(x) = ismissing(x) ? "--" : string(x)
+    lines = [
+        "\\begin{tabular}{lllccc}";
+        "\\toprule";
+        "&&& \\multicolumn{3}{c}{rhythm}\\\\";
+        "\\cmidrule(lr){4-6}";
+        reduce((s1, s2) -> s1 * " & " * s2, DF.names(df)) * " \\\\";
+        "\\midrule";
+        [reduce((s1, s2) -> replace_missing(s1) * " & " * replace_missing(s2), df[i, :]) * " \\\\" for i in 1:5];
+        "\\midrule";
+        [reduce((s1, s2) -> replace_missing(s1) * " & " * replace_missing(s2), df[i, :]) * " \\\\" for i in 6:10];
+        "\\midrule";
+        [reduce((s1, s2) -> replace_missing(s1) * " & " * replace_missing(s2), df[i, :]) * " \\\\" for i in 11:11];
+        "\\bottomrule";
+        "\\end{tabular}";
+    ]
+    println(reduce((s1, s2) -> s1 * "\n" * s2, lines))
+end
+
+
 
 
 
